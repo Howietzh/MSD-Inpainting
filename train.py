@@ -233,21 +233,14 @@ def main():
         if accelerator.is_main_process:
             unwrapped_text_encoder = accelerator.unwrap_model(text_encoder)
             token_monitor.log_token_drift(unwrapped_text_encoder, visualizer, epoch)
+            all_custom_tokens = defect_tokens + component_tokens
             visualizer.log_token_confusion_matrix(
                 unwrapped_text_encoder,
                 tokenizer,
-                defect_tokens,
+                all_custom_tokens,
                 epoch,
-                tag="Embeddings/Defect_Token_Similarity_Matrix",
-                title="Defect Tokens Cosine Similarity",
-            )
-            visualizer.log_token_confusion_matrix(
-                unwrapped_text_encoder,
-                tokenizer,
-                component_tokens,
-                epoch,
-                tag="Embeddings/Component_Token_Similarity_Matrix",
-                title="Component Tokens Cosine Similarity",
+                tag="Embeddings/All_Token_Similarity_Matrix",
+                title="All Custom Tokens Cosine Similarity",
             )
 
         if is_checkpoint_epoch:
