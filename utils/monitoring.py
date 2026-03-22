@@ -41,7 +41,7 @@ class TokenDriftMonitor:
 
 
 class TensorBoardVisualizer:
-    ATTENTION_CMAP = "cividis"
+    ATTENTION_CMAP = "turbo"
 
     def __init__(self, accelerator):
         self.accelerator = accelerator
@@ -201,8 +201,9 @@ class TensorBoardVisualizer:
         normalized_emb = F.normalize(target_embeddings, p=2, dim=1)
         sim_matrix = torch.matmul(normalized_emb, normalized_emb.T).cpu().numpy()
 
-        fig, ax = plt.subplots(figsize=(8, 8))
-        cax = ax.matshow(sim_matrix, cmap="viridis", vmin=-1.0, vmax=1.0)
+        fig, ax = plt.subplots(figsize=(10, 10))
+        # 【修改点 1】改用发散型色带 "RdBu_r" (红-白-蓝) 或 "coolwarm"
+        cax = ax.matshow(sim_matrix, cmap="RdBu_r", vmin=-1.0, vmax=1.0)
         fig.colorbar(cax, fraction=0.046, pad=0.04)
 
         ax.set_xticks(range(len(custom_tokens)))
@@ -213,7 +214,8 @@ class TensorBoardVisualizer:
 
         for i in range(len(custom_tokens)):
             for j in range(len(custom_tokens)):
-                text_color = "white" if sim_matrix[i, j] < 0.5 else "black"
+                # 【修改点 2】文字颜色自适应：绝对值大于 0.6 的深色区域用白色，其余较浅区域用黑色
+                text_color = "white" if abs(sim_matrix[i, j]) > 0.6 else "black"
                 ax.text(
                     j,
                     i,
