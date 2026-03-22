@@ -41,7 +41,7 @@ class TokenDriftMonitor:
 
 
 class TensorBoardVisualizer:
-    ATTENTION_CMAP = "magma"
+    ATTENTION_CMAP = "cividis"
 
     def __init__(self, accelerator):
         self.accelerator = accelerator
