@@ -14,7 +14,7 @@ SRC_ABNORMAL_IMGS = Path("/home/doctor/tzh/datasets/abnormal_images")
 SRC_ABNORMAL_COMP_MASKS = Path("/home/doctor/tzh/datasets/abnormal_component_masks")
 SRC_ABNORMAL_DEFECT_MASKS = Path("/home/doctor/tzh/datasets/abnormal_defect_masks")
 
-WORKSPACE_DIR = Path("/home/doctor/tzh/MSD-Inpainting-V2/data/CCM-Defect")
+WORKSPACE_DIR = Path("/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect")
 
 # ================= 2. 参数与标准 Token 映射 =================
 IMG_SIZE = 512

@@ -5,9 +5,9 @@ paths:
   model_id: "stabilityai/stable-diffusion-2-inpainting"
   local_model_path: null
   model_cache_dir: null
-  data_dir: "/home/doctor/tzh/MSD-Inpainting-V2/data/CCM-Defect/defect_train_concept"
-  output_dir: "/home/doctor/tzh/MSD-Inpainting-V2/defectfill_lora_weights"
-  logging_dir: "/home/doctor/tzh/MSD-Inpainting-V2/logs"
+  data_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/defect_train_concept"
+  output_dir: "/home/doctor/tzh/MSD-Inpainting/defectfill_lora_weights"
+  logging_dir: "/home/doctor/tzh/MSD-Inpainting/logs"
 
 training:
   resolution: 512
@@ -40,8 +40,8 @@ validation_inference:
   num_inference_steps: 30
   guidance_scale: 7.5
   base_seed: 42
-  normal_dir: "/home/doctor/tzh/MSD-Inpainting-V2/data/CCM-Defect/normal_components"
-  stats_cache: "/home/doctor/tzh/MSD-Inpainting-V2/data/CCM-Defect/defect_stats_cache.json"
+  normal_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/normal_components"
+  stats_cache: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/defect_stats_cache.json"
 
 defect_tokens:
   - "<flexible_printed_circuit_crack>"

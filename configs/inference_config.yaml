@@ -2,13 +2,13 @@
 # DefectFill 批量推理与生成全局配置文件
 # ==========================================
 paths:
-  workspace_dir: "/home/doctor/tzh/MSD-Inpainting-V2/data/CCM-Defect"
+  workspace_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect"
   model_config: "configs/train_config.yaml"  
-  lora_weights: "/home/doctor/tzh/MSD-Inpainting-V2/defectfill_lora_weights"
-  train_dir: "/home/doctor/tzh/MSD-Inpainting-V2/data/CCM-Defect/defect_train_concept"
-  normal_dir: "/home/doctor/tzh/MSD-Inpainting-V2/data/CCM-Defect/normal_components"
-  output_dir: "/home/doctor/tzh/MSD-Inpainting-V2/data/CCM-Defect/generated_defect_dataset"
-  stats_cache: "/home/doctor/tzh/MSD-Inpainting-V2/data/CCM-Defect/defect_stats_cache.json"
+  lora_weights: "/home/doctor/tzh/MSD-Inpainting/defectfill_lora_weights"
+  train_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/defect_train_concept"
+  normal_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/normal_components"
+  output_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/generated_defect_dataset"
+  stats_cache: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/defect_stats_cache.json"
 
 inference:
   batch_size: 8                    # 【新增】每次从 DataLoader 抽取几张不同的正常图
