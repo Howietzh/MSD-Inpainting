@@ -1,0 +1,64 @@
+# ==========================================
+# DefectFill 训练全局配置文件
+# ==========================================
+paths:
+  model_id: "stabilityai/stable-diffusion-2-inpainting"
+  local_model_path: null
+  model_cache_dir: null
+  data_dir: "/home/doctor/tzh/MSD-Inpainting-V2/data/CCM-Defect/defect_train_concept"
+  output_dir: "/home/doctor/tzh/MSD-Inpainting-V2/defectfill_lora_weights"
+  logging_dir: "/home/doctor/tzh/MSD-Inpainting-V2/logs"
+
+training:
+  resolution: 512
+  seed: 42
+  mixed_precision: "fp16"
+  train_batch_size: 2
+  gradient_accumulation_steps: 2      # 等效 Batch Size = 4
+  max_train_epochs: 80
+  dataloader_num_workers: 4
+  checkpoint_every_n_epochs: 10
+
+optimizer:
+  learning_rate_unet: 2.0e-4          # U-Net 学习率
+  learning_rate_text: 4.0e-5          # Text Encoder 学习率
+  weight_decay: 1.0e-4
+
+lora:
+  rank: 8
+  alpha: 8
+  dropout: 0.0
+
+loss_weights:
+  lambda_def: 0.5
+  lambda_obj: 0.2
+  lambda_attn: 0.05
+  object_loss_alpha: 0.25
+
+validation_inference:
+  enabled: true
+  num_inference_steps: 30
+  guidance_scale: 7.5
+  base_seed: 42
+  normal_dir: "/home/doctor/tzh/MSD-Inpainting-V2/data/CCM-Defect/normal_components"
+  stats_cache: "/home/doctor/tzh/MSD-Inpainting-V2/data/CCM-Defect/defect_stats_cache.json"
+
+defect_tokens:
+  - "<flexible_printed_circuit_crack>"
+  - "<foreign_particle>"
+  - "<end_face_scratch>"
+  - "<lens_scratch>"
+
+component_tokens:
+  - "<flexible_printed_circuit>"
+  - "<end_face>"
+  - "<lens>"
+
+token_init_phrases:
+  "<flexible_printed_circuit_crack>": "flexible printed circuit crack"
+  "<foreign_particle>": "foreign particle"
+  "<end_face_scratch>": "plastic housing scratch"
+  "<lens_scratch>": "lens scratch"
+  "<flexible_printed_circuit>": "flexible printed circuit"
+  "<end_face>": "plastic housing"
+  "<lens>": "lens"

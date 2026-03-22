@@ -1,0 +1,7 @@
+logs
+__pycache__
+defectfill_lora_weights
+generated_defect_dataset
+*.log
+data
+.DS_Store
