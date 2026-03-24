@@ -15,7 +15,7 @@ training:
   mixed_precision: "fp16"
   train_batch_size: 2
   gradient_accumulation_steps: 2      # 等效 Batch Size = 4
-  max_train_epochs: 800
+  max_train_epochs: 100
   dataloader_num_workers: 4
   checkpoint_every_n_epochs: 10
 
