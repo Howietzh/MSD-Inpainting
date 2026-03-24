@@ -11,15 +11,14 @@ def compute_defect_class_weights(data_dir, defect_tokens, max_weight: float = 6.
     if not metadata_path.exists():
         raise FileNotFoundError(f"Cannot compute defect class weights because metadata is missing: {metadata_path}")
 
-    defect_pixels_by_token = {token: 0 for token in defect_tokens}
-    background_pixels_total = 0
+    defect_ratios_by_token = {token: [] for token in defect_tokens}
 
     with open(metadata_path, "r", encoding="utf-8") as f:
         for line in f:
             item = json.loads(line.strip())
             defect_token = item.get("defect_token")
             defect_mask_path = item.get("defect_mask_path")
-            if defect_token not in defect_pixels_by_token or defect_mask_path is None:
+            if defect_token not in defect_ratios_by_token or defect_mask_path is None:
                 continue
 
             mask = np.array(Image.open(data_dir / defect_mask_path).convert("L"))
@@ -27,20 +26,23 @@ def compute_defect_class_weights(data_dir, defect_tokens, max_weight: float = 6.
             defect_pixels = int(defect_mask.sum())
             total_pixels = int(defect_mask.size)
 
-            defect_pixels_by_token[defect_token] += defect_pixels
-            background_pixels_total += max(total_pixels - defect_pixels, 0)
+            if total_pixels <= 0:
+                continue
 
-    if background_pixels_total <= 0:
+            defect_ratios_by_token[defect_token].append(defect_pixels / total_pixels)
+
+    if not any(defect_ratios_by_token.values()):
         return {token: 1.0 for token in defect_tokens}
 
     raw_weights = {}
     for token in defect_tokens:
-        defect_pixels = defect_pixels_by_token[token]
-        if defect_pixels <= 0:
+        defect_ratios = defect_ratios_by_token[token]
+        if not defect_ratios:
             raw_weights[token] = 1.0
             continue
-        proportion = defect_pixels / background_pixels_total
-        raw_weights[token] = float(np.sqrt(1.0 / max(proportion, 1e-6)))
+
+        mean_ratio = float(np.mean(defect_ratios))
+        raw_weights[token] = float(np.sqrt(1.0 / max(mean_ratio, 1e-6)))
 
     min_weight = min(raw_weights.values()) if raw_weights else 1.0
     if min_weight <= 0:
