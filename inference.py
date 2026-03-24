@@ -1,9 +1,16 @@
 import yaml
+import argparse
 from pathlib import Path
 from utils.mask_ops import DefectMaskEngine
 from utils.inference_pipeline import DefectFillPipeline
 
 def main():
+    # --- 新增：使用 argparse 解析命令行参数 ---
+    parser = argparse.ArgumentParser(description="Defect Fill Inference with overriding paths")
+    parser.add_argument("--lora_weights", type=str, default=None, help="Path to specific epoch LoRA weights.")
+    parser.add_argument("--output_dir", type=str, default=None, help="Output directory for this epoch.")
+    args = parser.parse_args()
+
     # 1. 读取 YAML 配置文件
     config_path = "configs/inference_config.yaml"
     with open(config_path, "r", encoding="utf-8") as f:
@@ -12,6 +19,12 @@ def main():
     paths = config["paths"]
     infer_config = config["inference"]
     tasks = config["tasks"]
+
+    # --- 新增：用命令行参数覆盖 YAML 里的配置 ---
+    if args.lora_weights:
+        paths["lora_weights"] = args.lora_weights
+    if args.output_dir:
+        paths["output_dir"] = args.output_dir
 
     # 2. 实例化缺陷掩码引擎
     mask_engine = DefectMaskEngine(
