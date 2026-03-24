@@ -5,7 +5,7 @@ set -euo pipefail
 TRAIN_CONFIG="configs/train_config.yaml"
 INFER_CONFIG="configs/inference_config.yaml"
 RUN_INFERENCE=1
-EXP_NAME=""
+EXP_NAME="defect_focused_denoising_loss_and_defect_focused_attention_loss_and_componet_attention_loss"
 TRAIN_EXTRA_ARGS=()
 
 usage() {
