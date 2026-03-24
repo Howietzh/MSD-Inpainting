@@ -5,7 +5,7 @@ from diffusers.models.attention_processor import Attention
 
 class StoreCrossAttnProcessor:
     def __init__(self):
-        self.attention_maps = []
+        self.attention_maps = {}
         self.target_token_indices = None
 
     def __call__(
@@ -52,20 +52,28 @@ class StoreCrossAttnProcessor:
         value = attn.head_to_batch_dim(value)
 
         attention_probs = attn.get_attention_scores(query, key, attention_mask)
-        if self.target_token_indices is not None:
+        if self.target_token_indices:
             _, hw, _ = attention_probs.shape
             if input_ndim == 4:
                 h, w = height, width
             else:
                 h = w = int(hw ** 0.5)
             attn_map = attention_probs.view(batch_size, attn.heads, hw, -1)
-            sample_maps = []
-
-            for batch_idx, token_index in enumerate(self.target_token_indices):
-                sample_attn = attn_map[batch_idx, :, :, token_index].view(attn.heads, h, w).mean(dim=0, keepdim=True)
-                sample_maps.append(sample_attn)
-
-            self.attention_maps.append(torch.stack(sample_maps, dim=0))
+            for target_name, token_indices in self.target_token_indices.items():
+                sample_maps = []
+                for batch_idx, token_index in enumerate(token_indices):
+                    if token_index < 0 or token_index >= attn_map.shape[-1]:
+                        sample_attn = torch.zeros(
+                            1,
+                            h,
+                            w,
+                            device=attn_map.device,
+                            dtype=attn_map.dtype,
+                        )
+                    else:
+                        sample_attn = attn_map[batch_idx, :, :, token_index].view(attn.heads, h, w).mean(dim=0, keepdim=True)
+                    sample_maps.append(sample_attn)
+                self.attention_maps.setdefault(target_name, []).append(torch.stack(sample_maps, dim=0))
 
         hidden_states = torch.bmm(attention_probs, value)
         hidden_states = attn.batch_to_head_dim(hidden_states)
@@ -96,26 +104,37 @@ class AttentionStore:
         unet.set_attn_processor(attn_processors)
 
     def set_target_token_indices(self, token_indices):
-        self.processor.target_token_indices = token_indices
+        self.processor.target_token_indices = {"default": token_indices}
 
-    def get_aggregated_attention(self, target_size: int = 64):
-        if not self.processor.attention_maps:
+    def set_named_target_token_indices(self, token_indices_by_name):
+        self.processor.target_token_indices = {
+            name: indices for name, indices in token_indices_by_name.items() if indices
+        }
+
+    def _aggregate_single_target(self, attention_maps, target_size: int = 64):
+        if not attention_maps:
             return None
 
         aggregated_map = None
         count = 0
-
-        for target_attn in self.processor.attention_maps:
+        for target_attn in attention_maps:
             resized_attn = F.interpolate(target_attn, size=(target_size, target_size), mode="bilinear", align_corners=False)
-
             if aggregated_map is None:
                 aggregated_map = resized_attn
             else:
                 aggregated_map += resized_attn
             count += 1
-
         return aggregated_map / count
 
+    def get_aggregated_attention(self, target_size: int = 64, target_name: str = "default"):
+        return self._aggregate_single_target(self.processor.attention_maps.get(target_name, []), target_size=target_size)
+
+    def get_aggregated_attentions(self, target_size: int = 64):
+        return {
+            target_name: self._aggregate_single_target(attention_maps, target_size=target_size)
+            for target_name, attention_maps in self.processor.attention_maps.items()
+        }
+
     def clear(self):
-        self.processor.attention_maps.clear()
+        self.processor.attention_maps = {}
         self.processor.target_token_indices = None

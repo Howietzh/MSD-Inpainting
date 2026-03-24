@@ -30,10 +30,10 @@ lora:
   dropout: 0.0
 
 loss_weights:
-  lambda_def: 0.5
-  lambda_obj: 0.2
-  lambda_attn: 0.05
-  object_loss_alpha: 0.25
+  lambda_rec: 1.0
+  lambda_attn_def: 0.2
+  lambda_attn_comp: 0.05
+  defect_class_weights: {}          # 留空时按训练集 defect mask 像素统计自动生成固定类别权重
 
 validation_inference:
   enabled: true

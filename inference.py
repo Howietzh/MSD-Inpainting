@@ -1,20 +1,29 @@
 import yaml
 import argparse
 from pathlib import Path
+from utils.config_overrides import apply_config_overrides
 from utils.mask_ops import DefectMaskEngine
 from utils.inference_pipeline import DefectFillPipeline
 
 def main():
     # --- 新增：使用 argparse 解析命令行参数 ---
     parser = argparse.ArgumentParser(description="Defect Fill Inference with overriding paths")
+    parser.add_argument("--config", type=str, default="configs/inference_config.yaml", help="Path to inference config.")
     parser.add_argument("--lora_weights", type=str, default=None, help="Path to specific epoch LoRA weights.")
     parser.add_argument("--output_dir", type=str, default=None, help="Output directory for this epoch.")
+    parser.add_argument(
+        "--set",
+        dest="overrides",
+        action="append",
+        default=[],
+        help="Override config values with dotted paths, e.g. --set inference.batch_size=4",
+    )
     args = parser.parse_args()
 
     # 1. 读取 YAML 配置文件
-    config_path = "configs/inference_config.yaml"
-    with open(config_path, "r", encoding="utf-8") as f:
+    with open(args.config, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
+    apply_config_overrides(config, args.overrides)
         
     paths = config["paths"]
     infer_config = config["inference"]

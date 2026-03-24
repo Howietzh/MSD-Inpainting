@@ -14,8 +14,9 @@ from dataset.inpainting_dataset import DefectFillDataset
 from models.lora_handler import setup_lora_and_tokens
 from models.attention_hook import AttentionStore
 from losses.defectfill_loss import DefectFillLoss
+from utils.config_overrides import apply_config_overrides
 from utils.runtime import resolve_model_source, resolve_pretrained_variant, resolve_weight_dtype
-from utils.mask_ops import build_random_box_mask
+from utils.class_weighting import resolve_defect_class_weights
 from utils.monitoring import TokenDriftMonitor, TensorBoardVisualizer
 from utils.validation_runner import build_validation_suite, run_periodic_inference_validation, tokenize_prompts
 
@@ -23,12 +24,20 @@ from utils.validation_runner import build_validation_suite, run_periodic_inferen
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/train_config.yaml")
+    parser.add_argument(
+        "--set",
+        dest="overrides",
+        action="append",
+        default=[],
+        help="Override config values with dotted paths, e.g. --set loss_weights.lambda_rec=1.0",
+    )
     return parser.parse_args()
 
 def main():
     args = parse_args()
     with open(args.config, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
+    applied_overrides = apply_config_overrides(config, args.overrides)
 
     seed = int(config["training"].get("seed", 42))
     set_seed(seed)
@@ -53,6 +62,8 @@ def main():
     # 【改动 2】初始化 Tracker
     if accelerator.is_main_process:
         accelerator.init_trackers("defectfill_training")
+        if applied_overrides:
+            print(f"🛠️ 已应用配置覆盖: {applied_overrides}")
 
     # 加载预训练模型
     model_source = resolve_model_source(config["paths"])
@@ -94,12 +105,15 @@ def main():
 
     # 实例化 Loss
     lw = config["loss_weights"]
+    defect_class_weights = resolve_defect_class_weights(config)
     criterion = DefectFillLoss(
-        lambda_def=lw["lambda_def"],
-        lambda_obj=lw["lambda_obj"],
-        lambda_attn=lw["lambda_attn"],
-        object_loss_alpha=config["loss_weights"].get("object_loss_alpha", 0.25),
+        lambda_rec=lw["lambda_rec"],
+        lambda_attn_def=lw["lambda_attn_def"],
+        lambda_attn_comp=lw["lambda_attn_comp"],
+        defect_class_weights=defect_class_weights,
     )
+    if accelerator.is_main_process:
+        print(f"🎯 已加载缺陷类别权重: {defect_class_weights}")
 
     validation_suite = build_validation_suite(config)
     token_monitor = TokenDriftMonitor(text_encoder, tokenizer, defect_tokens, component_tokens)
@@ -154,7 +168,7 @@ def main():
             with accelerator.accumulate(unet, text_encoder):
                 pixel_values = batch["pixel_values"].to(device, dtype=weight_dtype)
                 defect_mask = batch["mask_values"].to(device, dtype=weight_dtype)
-                defect_prompt_ids = tokenize_prompts(tokenizer, batch["defect_prompt"]).to(device)
+                component_mask = batch["component_mask_values"].to(device, dtype=weight_dtype)
                 object_prompt_ids = tokenize_prompts(tokenizer, batch["object_prompt"]).to(device)
 
                 # VAE 编码与 9 通道准备
@@ -166,39 +180,46 @@ def main():
                 latent_mask = F.interpolate(defect_mask, size=(latents.shape[2], latents.shape[3]), mode="nearest")
                 masked_image = pixel_values * (defect_mask < 0.5).to(weight_dtype)
                 masked_image_latents = vae.encode(masked_image).latent_dist.sample() * vae.config.scaling_factor
-                defect_model_input = torch.cat([noisy_latents, latent_mask, masked_image_latents], dim=1)
+                model_input = torch.cat([noisy_latents, latent_mask, masked_image_latents], dim=1)
 
-                random_mask = build_random_box_mask(defect_mask)
-                latent_random_mask = F.interpolate(random_mask, size=(latents.shape[2], latents.shape[3]), mode="nearest")
-                random_masked_image = pixel_values * (random_mask < 0.5).to(weight_dtype)
-                random_masked_image_latents = vae.encode(random_masked_image).latent_dist.sample() * vae.config.scaling_factor
-                object_model_input = torch.cat([noisy_latents, latent_random_mask, random_masked_image_latents], dim=1)
-
-                defect_hidden_states = text_encoder(defect_prompt_ids)[0]
-                defect_model_pred = unet(defect_model_input, timesteps, defect_hidden_states).sample
-
-                # 原代码会在 prompt 里寻找 new_token_ids
-                token_indices = []
+                defect_token_indices = []
+                component_token_indices = []
                 for sample_input_ids in object_prompt_ids:
-                    target_token_index = -1
+                    defect_token_index = -1
+                    component_token_index = -1
                     for idx, token_id in enumerate(sample_input_ids):
-                        # 【关键修改】：这里必须换成 defect_token_ids
-                        if token_id.item() in defect_token_ids:
-                            target_token_index = idx
+                        token_value = token_id.item()
+                        if defect_token_index < 0 and token_value in defect_token_ids:
+                            defect_token_index = idx
+                        if component_token_index < 0 and token_value in component_token_ids:
+                            component_token_index = idx
+                        if defect_token_index >= 0 and component_token_index >= 0:
                             break
-                    token_indices.append(target_token_index)
+                    defect_token_indices.append(defect_token_index)
+                    component_token_indices.append(component_token_index)
 
                 attn_store.clear()
-                attention_map = None
-                if all(token_index >= 0 for token_index in token_indices):
-                    attn_store.set_target_token_indices(token_indices)
+                named_token_indices = {}
+                if all(token_index >= 0 for token_index in defect_token_indices):
+                    named_token_indices["defect"] = defect_token_indices
+                if all(token_index >= 0 for token_index in component_token_indices):
+                    named_token_indices["component"] = component_token_indices
+                if named_token_indices:
+                    attn_store.set_named_target_token_indices(named_token_indices)
 
                 object_hidden_states = text_encoder(object_prompt_ids)[0]
-                object_model_pred = unet(object_model_input, timesteps, object_hidden_states).sample
+                model_pred = unet(model_input, timesteps, object_hidden_states).sample
 
-                if all(token_index >= 0 for token_index in token_indices):
-                    attention_map = attn_store.get_aggregated_attention(target_size=latents.shape[-1])
-                loss, loss_dict = criterion(defect_model_pred, object_model_pred, noise, defect_mask, attention_map)
+                attention_maps = attn_store.get_aggregated_attentions(target_size=latents.shape[-1])
+                loss, loss_dict = criterion(
+                    model_pred,
+                    noise,
+                    defect_mask,
+                    component_mask,
+                    batch["defect_token"],
+                    defect_attention_map=attention_maps.get("defect"),
+                    component_attention_map=attention_maps.get("component"),
+                )
 
                 accelerator.backward(loss)
                 optimizer.step()
@@ -210,20 +231,14 @@ def main():
                 # 记录详细的拆解 Loss
                 accelerator.log({
                     "Loss/Total": loss.item(),
-                    "Loss/Defect (L_def)": loss_dict["loss_def"],
-                    "Loss/Object (L_obj)": loss_dict["loss_obj"],
-                    "Loss/Attention (L_attn)": loss_dict["loss_attn"]
+                    "Loss/Reconstruction (L_rec)": loss_dict["loss_rec"],
+                    "Loss/DefectAttention (L_attn_def)": loss_dict["loss_attn_def"],
+                    "Loss/ComponentAttention (L_attn_comp)": loss_dict["loss_attn_comp"],
+                    "Loss/MeanDefectWeight": loss_dict["mean_defect_weight"],
                 }, step=global_step)
                 
                 if step % 10 == 0:
                     print(f"Epoch {epoch} | Step {global_step} | Total Loss: {loss.item():.4f} | {loss_dict}")
-                if is_checkpoint_epoch and step == len(dataloader) - 1:
-                    visualizer.log_random_box_diagnostics(
-                        input_image=(pixel_values * 0.5 + 0.5),
-                        defect_mask=defect_mask,
-                        random_mask=random_mask,
-                        step=epoch,
-                    )
             
             global_step += 1
         # ==========================================
