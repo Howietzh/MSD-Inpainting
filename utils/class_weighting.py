@@ -43,7 +43,7 @@ def compute_defect_class_weights(data_dir, defect_tokens, max_weight: float = 6.
 
         mean_ratio = float(np.mean(defect_ratios))
         # raw_weights[token] = float(np.sqrt(1.0 / max(mean_ratio, 1e-6)))
-        raw_weights[token] = float(np.log10(1.0 / max(mean_ratio, 1e-6)))
+        raw_weights[token] = float(np.power(1.0 / max(mean_ratio, 1e-6), 0.3))
 
     normalized_weights = {}
     for token, raw_weight in raw_weights.items():
