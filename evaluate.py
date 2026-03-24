@@ -16,6 +16,8 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import models, transforms
 
+from utils.config_overrides import apply_config_overrides
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -25,6 +27,13 @@ def parse_args():
         type=str,
         default="all",
         choices=["all", "generation", "classification", "localization"],
+    )
+    parser.add_argument(
+        "--set",
+        dest="overrides",
+        action="append",
+        default=[],
+        help="Override config values with dotted paths, e.g. --set generation.feature_batch_size=8",
     )
     return parser.parse_args()
 
@@ -662,6 +671,7 @@ def main():
     args = parse_args()
     with open(args.config, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
+    apply_config_overrides(config, args.overrides)
 
     device = torch.device(config.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
     report = {}

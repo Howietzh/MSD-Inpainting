@@ -1,45 +1,117 @@
 import torch
-import torch.nn.functional as F
 import torch.nn as nn
+import torch.nn.functional as F
+
 
 class DefectFillLoss(nn.Module):
-    def __init__(self, lambda_def=0.5, lambda_obj=0.2, lambda_attn=0.2, object_loss_alpha=0.25):
+    def __init__(
+        self,
+        lambda_rec=1.0,
+        lambda_attn_def=0.2,
+        lambda_attn_comp=0.05,
+        defect_class_weights=None,
+        dilation_kernel_size=5,
+    ):
         super().__init__()
-        self.lambda_def = lambda_def
-        self.lambda_obj = lambda_obj
-        self.lambda_attn = lambda_attn
-        self.object_loss_alpha = object_loss_alpha
+        self.lambda_rec = float(lambda_rec)
+        self.lambda_attn_def = float(lambda_attn_def)
+        self.lambda_attn_comp = float(lambda_attn_comp)
+        self.defect_class_weights = defect_class_weights or {}
+        self.dilation_kernel_size = int(dilation_kernel_size)
+
+        if self.dilation_kernel_size <= 0 or self.dilation_kernel_size % 2 == 0:
+            raise ValueError("dilation_kernel_size must be a positive odd integer.")
 
     def _normalize_attention_map(self, attention_map):
         attn_min = attention_map.amin(dim=(-2, -1), keepdim=True)
         attn_max = attention_map.amax(dim=(-2, -1), keepdim=True)
         return (attention_map - attn_min) / (attn_max - attn_min + 1e-6)
 
-    def _masked_mse(self, model_pred, target_noise, mask):
-        mse_error = (model_pred - target_noise) ** 2
-        weighted_error = mse_error * mask
-        denom = mask.sum() * model_pred.shape[1]
+    def _to_latent_binary_mask(self, mask, size):
+        latent_mask = F.interpolate(mask.float(), size=size, mode="nearest")
+        return (latent_mask > 0.5).float()
+
+    def _dilate_mask(self, mask):
+        padding = self.dilation_kernel_size // 2
+        return F.max_pool2d(mask, kernel_size=self.dilation_kernel_size, stride=1, padding=padding)
+
+    def _resolve_defect_weights(self, defect_tokens, device, dtype):
+        weights = []
+        available_tokens = sorted(self.defect_class_weights.keys())
+        for defect_token in defect_tokens:
+            if defect_token not in self.defect_class_weights:
+                raise KeyError(
+                    f"Missing class weight for defect token {defect_token!r}. Available tokens: {available_tokens}"
+                )
+            weights.append(float(self.defect_class_weights[defect_token]))
+
+        return torch.tensor(weights, device=device, dtype=dtype).view(-1, 1, 1, 1)
+
+    def _weighted_mse(self, pred, target, weight_map):
+        squared_error = (pred - target) ** 2
+        weighted_error = squared_error * weight_map
+        denom = weight_map.sum() * pred.shape[1]
         if denom <= 0:
-            return torch.tensor(0.0, device=model_pred.device, dtype=model_pred.dtype)
+            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
         return weighted_error.sum() / denom
 
-    def forward(self, defect_model_pred, object_model_pred, target_noise, defect_mask, attention_map=None):
-        _, _, h, w = defect_model_pred.shape
+    def _weighted_attention_mse(self, attention_map, target_mask, weight_map):
+        normalized_attention = self._normalize_attention_map(attention_map.float())
+        squared_error = (normalized_attention - target_mask.float()) ** 2
+        weighted_error = squared_error * weight_map
+        denom = weight_map.sum()
+        if denom <= 0:
+            return torch.tensor(0.0, device=attention_map.device, dtype=attention_map.dtype)
+        return weighted_error.sum() / denom
 
-        latent_defect_mask = F.interpolate(defect_mask, size=(h, w), mode="nearest")
-        object_weight_mask = latent_defect_mask + self.object_loss_alpha * (1.0 - latent_defect_mask)
+    def forward(
+        self,
+        model_pred,
+        target_noise,
+        defect_mask,
+        component_mask,
+        defect_tokens,
+        defect_attention_map=None,
+        component_attention_map=None,
+    ):
+        _, _, h, w = model_pred.shape
+        latent_size = (h, w)
 
-        # L_def: 缺陷去噪损失
-        loss_def = self._masked_mse(defect_model_pred, target_noise, latent_defect_mask)
+        latent_defect_mask = self._to_latent_binary_mask(defect_mask, latent_size)
+        latent_component_mask = self._to_latent_binary_mask(component_mask, latent_size)
+        latent_dilated_mask = self._dilate_mask(latent_defect_mask) * latent_component_mask
+        latent_dilated_mask = (latent_dilated_mask > 0.5).float()
 
-        # L_obj: 论文 Eq.(7) 的加权全图损失
-        loss_obj = self._masked_mse(object_model_pred, target_noise, object_weight_mask)
+        defect_weights = self._resolve_defect_weights(defect_tokens, model_pred.device, model_pred.dtype)
+        reconstruction_weight_map = 1.0 + defect_weights * latent_dilated_mask
 
-        # L_attn: 交叉注意力特征对齐损失
-        loss_attn = torch.tensor(0.0, device=defect_model_pred.device, dtype=defect_model_pred.dtype)
-        if attention_map is not None:
-            normalized_attention_map = self._normalize_attention_map(attention_map.float())
-            loss_attn = F.mse_loss(normalized_attention_map, latent_defect_mask.float())
+        loss_rec = self._weighted_mse(model_pred, target_noise, reconstruction_weight_map)
 
-        total_loss = (self.lambda_def * loss_def) + (self.lambda_obj * loss_obj) + (self.lambda_attn * loss_attn)
-        return total_loss, {"loss_def": loss_def.item(), "loss_obj": loss_obj.item(), "loss_attn": loss_attn.item()}
+        loss_attn_def = torch.tensor(0.0, device=model_pred.device, dtype=model_pred.dtype)
+        if defect_attention_map is not None:
+            defect_attention_weights = 1.0 + defect_weights * latent_dilated_mask
+            loss_attn_def = self._weighted_attention_mse(
+                defect_attention_map,
+                latent_dilated_mask,
+                defect_attention_weights,
+            )
+
+        loss_attn_comp = torch.tensor(0.0, device=model_pred.device, dtype=model_pred.dtype)
+        if component_attention_map is not None:
+            loss_attn_comp = F.mse_loss(
+                self._normalize_attention_map(component_attention_map.float()),
+                latent_component_mask.float(),
+            )
+
+        total_loss = (
+            (self.lambda_rec * loss_rec)
+            + (self.lambda_attn_def * loss_attn_def)
+            + (self.lambda_attn_comp * loss_attn_comp)
+        )
+
+        return total_loss, {
+            "loss_rec": loss_rec.item(),
+            "loss_attn_def": loss_attn_def.item(),
+            "loss_attn_comp": loss_attn_comp.item(),
+            "mean_defect_weight": defect_weights.mean().item(),
+        }

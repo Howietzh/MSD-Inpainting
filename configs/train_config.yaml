@@ -5,9 +5,9 @@ paths:
   model_id: "stabilityai/stable-diffusion-2-inpainting"
   local_model_path: null
   model_cache_dir: null
-  data_dir: "/home/doctor/tzh/MSD-Inpainting-V2/data/CCM-Defect/defect_train_concept"
-  output_dir: "/home/doctor/tzh/MSD-Inpainting-V2/defectfill_lora_weights"
-  logging_dir: "/home/doctor/tzh/MSD-Inpainting-V2/logs"
+  data_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/defect_train_concept"
+  output_dir: "/home/doctor/tzh/MSD-Inpainting/defectfill_lora_weights"
+  logging_dir: "/home/doctor/tzh/MSD-Inpainting/logs"
 
 training:
   resolution: 512
@@ -15,7 +15,7 @@ training:
   mixed_precision: "fp16"
   train_batch_size: 2
   gradient_accumulation_steps: 2      # 等效 Batch Size = 4
-  max_train_epochs: 80
+  max_train_epochs: 100
   dataloader_num_workers: 4
   checkpoint_every_n_epochs: 10
 
@@ -30,18 +30,18 @@ lora:
   dropout: 0.0
 
 loss_weights:
-  lambda_def: 0.5
-  lambda_obj: 0.2
-  lambda_attn: 0.05
-  object_loss_alpha: 0.25
+  lambda_rec: 1.0
+  lambda_attn_def: 0.2
+  lambda_attn_comp: 0.05
+  defect_class_weights: {}          # 留空时按训练集 defect mask 像素统计自动生成固定类别权重
 
 validation_inference:
   enabled: true
   num_inference_steps: 30
   guidance_scale: 7.5
   base_seed: 42
-  normal_dir: "/home/doctor/tzh/MSD-Inpainting-V2/data/CCM-Defect/normal_components"
-  stats_cache: "/home/doctor/tzh/MSD-Inpainting-V2/data/CCM-Defect/defect_stats_cache.json"
+  normal_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/normal_components"
+  stats_cache: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/defect_stats_cache.json"
 
 defect_tokens:
   - "<flexible_printed_circuit_crack>"

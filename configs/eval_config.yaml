@@ -1,10 +1,10 @@
 device: "cuda"
 
 paths:
-  generated_dir: "/home/doctor/tzh/MSD-Inpainting-V2/data/CCM-Defect/generated_defect_dataset"
-  real_holdout_dir: "/home/doctor/tzh/MSD-Inpainting-V2/data/CCM-Defect/defect_test_holdout"
-  normal_dir: "/home/doctor/tzh/MSD-Inpainting-V2/data/CCM-Defect/normal_components"
-  report_path: "/home/doctor/tzh/MSD-Inpainting-V2/data/CCM-Defect/eval_reports/defectfill_eval.json"
+  generated_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/generated_defect_dataset"
+  real_holdout_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/defect_test_holdout"
+  normal_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/normal_components"
+  report_path: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/eval_reports/defectfill_eval.json"
 
 generation:
   image_size: 512
