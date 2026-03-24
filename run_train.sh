@@ -5,8 +5,10 @@ set -euo pipefail
 TRAIN_CONFIG="configs/train_config.yaml"
 INFER_CONFIG="configs/inference_config.yaml"
 RUN_INFERENCE=1
-EXP_NAME="defect_focused_denoising_loss_and_defect_focused_attention_loss_and_componet_attention_loss"
-TRAIN_EXTRA_ARGS=()
+EXP_NAME="increase_text_encoder_learning_rates"
+TRAIN_EXTRA_ARGS=(
+    --set optimizer.learning_rate_text=1e-4
+)
 
 usage() {
     cat <<'EOF'
