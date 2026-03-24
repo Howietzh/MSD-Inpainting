@@ -55,9 +55,9 @@ class TensorBoardVisualizer:
 
     def _normalize_heatmap(self, tensor):
         tensor = tensor.detach().float()
-        # heatmap_min = tensor.amin(dim=(-2, -1), keepdim=True)
+        heatmap_min = tensor.amin(dim=(-2, -1), keepdim=True)
         heatmap_max = tensor.amax(dim=(-2, -1), keepdim=True)
-        return tensor/ heatmap_max.clamp(min=1e-6)
+        return (tensor - heatmap_min) / (heatmap_max - heatmap_min + 1e-8)
 
     def _apply_colormap(self, tensor, cmap_name=None):
         B, C, H, W = tensor.shape
