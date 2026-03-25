@@ -3,7 +3,6 @@ device: "cuda"
 paths:
   generated_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/generated_defect_dataset"
   real_holdout_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/defect_test_holdout"
-  normal_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/normal_components"
   report_path: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/eval_reports/defectfill_eval.json"
 
 generation:
@@ -12,18 +11,5 @@ generation:
   kid_subset_size: 100
   kid_num_subsets: 50
   ic_lpips_max_pairs_per_category: 200
-
-classification:
-  image_size: 224
-  batch_size: 16
-  epochs: 10
-  learning_rate: 1.0e-4
-  pretrained_backbone: false
-
-localization:
-  image_size: 256
-  batch_size: 8
-  epochs: 10
-  learning_rate: 1.0e-4
-  focal_alpha: 0.25
-  focal_gamma: 2.0
+  ic_lpips_backbone: "alex"
+  lpips_batch_size: 32
