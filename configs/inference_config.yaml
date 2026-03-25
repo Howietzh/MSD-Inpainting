@@ -7,7 +7,7 @@ paths:
   lora_weights: "/home/doctor/tzh/MSD-Inpainting/defectfill_lora_weights/checkpoint-epoch-10"
   train_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/defect_train_concept"
   normal_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/normal_components"
-  output_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/generated_defect_dataset_e10"
+  output_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/generated_defect_dataset"
   stats_cache: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/defect_stats_cache.json"
 
 inference:
