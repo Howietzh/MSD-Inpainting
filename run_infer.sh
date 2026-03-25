@@ -8,7 +8,7 @@ WEIGHTS_ROOT=""
 OUTPUT_ROOT=""
 CHECKPOINT_REL=""
 RUN_ALL_EXPERIMENTS=0
-EXPERIMENT_NAMES=("defectfill_origin", "increase_text_encoder_learning_rates")
+EXPERIMENT_NAMES=("defectfill_origin" "increase_text_encoder_learning_rates")
 INFER_EXTRA_ARGS=()
 
 usage() {
