@@ -16,7 +16,8 @@ inference:
   num_inference_steps: 30          
   guidance_scale: 7.5              
   negative_prompt: "blurry, smooth, unrealistic, artifacts" 
-  base_seed: 42                    
+  base_seed: 42
+  lpips_backbone: "alex"           # 可选: alex / vgg / squeeze
 
 # 定义需要批量生成的任务清单
 tasks:

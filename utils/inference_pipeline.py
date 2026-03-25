@@ -87,10 +87,15 @@ class DefectFillPipeline:
         self.pipe.to(self.device)
         self.pipe.set_progress_bar_config(disable=True) 
         self.pipe.enable_attention_slicing()
-        
+        lpips_backbone = self.infer_config.get("lpips_backbone", "alex")
+
         if self.distributed_state.is_main_process:
-            print(f"🧠 已扩容词表至 {new_vocab_size} 并初始化 LPIPS 模型...")
-        self.lpips_vgg = lpips.LPIPS(net='vgg').to(self.device)
+            print(f"🧠 已扩容词表至 {new_vocab_size} 并初始化 LPIPS 模型 ({lpips_backbone})...")
+        self.lpips_model = lpips.LPIPS(net=lpips_backbone).to(self.device)
+        self.lpips_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        ])
 
     def _build_visualization(self, init_img_np, defect_mask_np, generated_img_pil):
         mask_bool = defect_mask_np > 127
@@ -103,9 +108,10 @@ class DefectFillPipeline:
         canvas = np.concatenate([init_img_np, overlay, generated_img_np], axis=1)
         return Image.fromarray(canvas)
         
-    def _calculate_lpips(self, img_orig, img_gen, mask_np):
+    def _prepare_lpips_crop_pair(self, img_orig, img_gen, mask_np):
         coords = cv2.findNonZero(mask_np)
-        if coords is None: return 0.0
+        if coords is None:
+            return None
         x, y, w, h = cv2.boundingRect(coords)
         
         # 1. 裁剪出缺陷区域
@@ -121,22 +127,47 @@ class DefectFillPipeline:
             orig_crop = cv2.resize(orig_crop, (224, 224), interpolation=cv2.INTER_CUBIC)
             gen_crop = cv2.resize(gen_crop, (224, 224), interpolation=cv2.INTER_CUBIC)
         else:
-            return 0.0
-        
-        # 2. 转换为 Tensor 并归一化
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-        ])
-        
-        orig_tensor = transform(orig_crop).unsqueeze(0).to(self.device)
-        gen_tensor = transform(gen_crop).unsqueeze(0).to(self.device)
-        
-        # 3. 计算得分
+            return None
+
+        orig_tensor = self.lpips_transform(orig_crop)
+        gen_tensor = self.lpips_transform(gen_crop)
+        return orig_tensor, gen_tensor
+
+    def _calculate_lpips_batch(self, img_orig_batch, img_gen_batch, mask_batch):
+        if not (len(img_orig_batch) == len(img_gen_batch) == len(mask_batch)):
+            raise ValueError(
+                "LPIPS batch inputs must have identical lengths: "
+                f"got {len(img_orig_batch)}, {len(img_gen_batch)}, {len(mask_batch)}"
+            )
+
+        orig_tensors = []
+        gen_tensors = []
+        valid_indices = []
+        scores = [0.0] * len(mask_batch)
+
+        for idx, (img_orig, img_gen, mask_np) in enumerate(zip(img_orig_batch, img_gen_batch, mask_batch)):
+            crop_pair = self._prepare_lpips_crop_pair(img_orig, img_gen, mask_np)
+            if crop_pair is None:
+                continue
+
+            orig_tensor, gen_tensor = crop_pair
+            orig_tensors.append(orig_tensor)
+            gen_tensors.append(gen_tensor)
+            valid_indices.append(idx)
+
+        if not valid_indices:
+            return scores
+
+        orig_batch_tensor = torch.stack(orig_tensors, dim=0).to(self.device)
+        gen_batch_tensor = torch.stack(gen_tensors, dim=0).to(self.device)
+
         with torch.no_grad():
-            score = self.lpips_vgg(orig_tensor, gen_tensor)
-            
-        return score.item()
+            batch_scores = self.lpips_model(orig_batch_tensor, gen_batch_tensor).view(-1)
+
+        for idx, score in zip(valid_indices, batch_scores):
+            scores[idx] = score.item()
+
+        return scores
 
     def execute_tasks(self, tasks):
         if self.distributed_state.is_main_process:
@@ -249,9 +280,23 @@ class DefectFillPipeline:
                             guidance_scale=guidance_scale, 
                             generator=generators
                         ).images
+
+                        if len(out_images) != current_b_size:
+                            raise RuntimeError(
+                                "Diffusion output count does not match the input batch size: "
+                                f"got {len(out_images)} outputs for batch size {current_b_size}"
+                            )
                         
-                        for b in range(current_b_size):
-                            score = self._calculate_lpips(init_imgs_np[b], np.array(out_images[b]), defect_masks_np[b])
+                        out_images_np = [np.array(out_img) for out_img in out_images]
+                        batch_scores = self._calculate_lpips_batch(init_imgs_np, out_images_np, defect_masks_np)
+
+                        if len(batch_scores) != current_b_size:
+                            raise RuntimeError(
+                                "LPIPS batch score count does not match the diffusion batch size: "
+                                f"got {len(batch_scores)} scores for batch size {current_b_size}"
+                            )
+
+                        for b, score in enumerate(batch_scores):
                             if score > best_scores[b]:
                                 best_scores[b] = score
                                 best_images[b] = out_images[b]
