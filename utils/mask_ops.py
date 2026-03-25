@@ -30,50 +30,201 @@ class DefectMaskEngine:
         self.cache_file = cache_file
         self.stats_cache = {}
 
+    def _build_default_stats(self, defect_token):
+        if "particle" in defect_token:
+            return {
+                "kind": "particle",
+                "radius": {"p10": 3, "p90": 8},
+                "count": {"p10": 1, "p90": 3},
+            }
+
+        if "crack" in defect_token or "tear" in defect_token:
+            return {
+                "kind": "tear",
+                "length": {"p10": 50, "p90": 150},
+                "width": {"p10": 5, "p90": 15},
+            }
+
+        return {
+            "kind": "scratch",
+            "length": {"p10": 50, "p90": 150},
+            "thickness": {"p10": 5, "p90": 15},
+        }
+
+    def _is_structured_stats(self, stats):
+        return isinstance(stats, dict) and "kind" in stats
+
+    def _percentile_range(self, values, minimum, minimum_gap=0):
+        if not values:
+            return {"p10": minimum, "p90": max(minimum, minimum + minimum_gap)}
+
+        p10 = int(np.percentile(values, 10))
+        p90 = int(np.percentile(values, 90))
+        p10 = max(minimum, p10)
+        p90 = max(p10 + minimum_gap, p90)
+        return {"p10": p10, "p90": p90}
+
+    def _extract_valid_components(self, mask):
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
+        components = []
+
+        for label_idx in range(1, num_labels):
+            area = int(stats[label_idx, cv2.CC_STAT_AREA])
+            if area < 4:
+                continue
+
+            component_mask = np.zeros_like(mask, dtype=np.uint8)
+            component_mask[labels == label_idx] = 255
+            components.append(component_mask)
+
+        return components
+
+    def _skeletonize(self, mask):
+        skeleton = np.zeros_like(mask, dtype=np.uint8)
+        work_mask = (mask > 0).astype(np.uint8) * 255
+        kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+
+        while cv2.countNonZero(work_mask) > 0:
+            eroded = cv2.erode(work_mask, kernel)
+            temp = cv2.dilate(eroded, kernel)
+            skeleton = cv2.bitwise_or(skeleton, cv2.subtract(work_mask, temp))
+            work_mask = eroded
+
+        return skeleton
+
+    def _measure_skeleton_length_and_widths(self, component_mask):
+        skeleton = self._skeletonize(component_mask)
+        skeleton_coords = np.column_stack(np.where(skeleton > 0))
+        if len(skeleton_coords) == 0:
+            return 0.0, []
+
+        dist_map = cv2.distanceTransform(component_mask, cv2.DIST_L2, 5)
+        local_widths = [float(2.0 * dist_map[y, x]) for y, x in skeleton_coords]
+        length = float(len(skeleton_coords))
+        return length, local_widths
+
+    def _measure_projected_length(self, component_mask):
+        ys, xs = np.where(component_mask > 0)
+        if len(xs) < 2:
+            return 0.0
+
+        points = np.stack([xs, ys], axis=1).astype(np.float32)
+        center = points.mean(axis=0, keepdims=True)
+        centered = points - center
+        _, _, vh = np.linalg.svd(centered, full_matrices=False)
+        principal_axis = vh[0]
+        projections = centered @ principal_axis
+        return float(projections.max() - projections.min())
+
+    def _print_stats_summary(self, defect_token, stats, sample_count):
+        kind = stats["kind"]
+        if kind == "scratch":
+            print(
+                f"\n📈 [{defect_token}] Scratch 统计: 实例数 {sample_count} | "
+                f"PathLength [{stats['length']['p10']}, {stats['length']['p90']}] | "
+                f"LineWidth [{stats['thickness']['p10']}, {stats['thickness']['p90']}]"
+            )
+        elif kind == "tear":
+            print(
+                f"\n📈 [{defect_token}] Tear/Crack 统计: 实例数 {sample_count} | "
+                f"PenetrationLength [{stats['length']['p10']}, {stats['length']['p90']}] | "
+                f"RootWidth [{stats['width']['p10']}, {stats['width']['p90']}]"
+            )
+        else:
+            print(
+                f"\n📈 [{defect_token}] Particle 统计: 图像数 {sample_count} | "
+                f"Radius [{stats['radius']['p10']}, {stats['radius']['p90']}] | "
+                f"Count [{stats['count']['p10']}, {stats['count']['p90']}]"
+            )
+
     def _compute_single_defect_stats(self, defect_token):
         metadata_path = self.train_dir / "metadata.jsonl"
-        lengths, thicknesses = [], []
-
         if not metadata_path.exists():
-            return 50, 150, 5, 15
+            return self._build_default_stats(defect_token)
 
-        with open(metadata_path, "r", encoding="utf-8") as f:
-            for line in f:
-                item = json.loads(line.strip())
-                if item.get("defect_token") == defect_token and "defect_mask_path" in item:
+        if "particle" in defect_token:
+            radii, counts = [], []
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    item = json.loads(line.strip())
+                    if item.get("defect_token") != defect_token or "defect_mask_path" not in item:
+                        continue
+
                     mask_path = self.train_dir / item["defect_mask_path"]
                     if not mask_path.exists():
                         continue
 
                     mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-                    if mask is not None and cv2.countNonZero(mask) > 0:
-                        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                        for cnt in contours:
-                            area = cv2.contourArea(cnt)
-                            if area < 4:
-                                continue
+                    if mask is None or cv2.countNonZero(mask) == 0:
+                        continue
 
-                            _, _, w, h = cv2.boundingRect(cnt)
-                            length = max(w, h)
+                    components = self._extract_valid_components(mask)
+                    if not components:
+                        continue
 
-                            if "particle" in defect_token:
-                                thicknesses.append(max(2, int(np.sqrt(area / np.pi))))
-                                lengths.append(length)
-                            else:
-                                thicknesses.append(max(2, int(area / length)) if length > 0 else 2)
-                                lengths.append(length)
+                    counts.append(len(components))
+                    for component_mask in components:
+                        area = cv2.countNonZero(component_mask)
+                        radii.append(max(2.0, float(np.sqrt(area / np.pi))))
+
+            stats = {
+                "kind": "particle",
+                "radius": self._percentile_range(radii, minimum=2, minimum_gap=1),
+                "count": self._percentile_range(counts, minimum=1, minimum_gap=0),
+            }
+            self._print_stats_summary(defect_token, stats, sample_count=len(counts))
+            return stats
+
+        lengths, secondary_values = [], []
+        is_tear_like = ("crack" in defect_token or "tear" in defect_token)
+
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            for line in f:
+                item = json.loads(line.strip())
+                if item.get("defect_token") != defect_token or "defect_mask_path" not in item:
+                    continue
+
+                mask_path = self.train_dir / item["defect_mask_path"]
+                if not mask_path.exists():
+                    continue
+
+                mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+                if mask is None or cv2.countNonZero(mask) == 0:
+                    continue
+
+                for component_mask in self._extract_valid_components(mask):
+                    if is_tear_like:
+                        length = self._measure_projected_length(component_mask)
+                        _, local_widths = self._measure_skeleton_length_and_widths(component_mask)
+                        if length <= 0 or not local_widths:
+                            continue
+                        lengths.append(length)
+                        secondary_values.append(float(np.percentile(local_widths, 75)))
+                    else:
+                        length, local_widths = self._measure_skeleton_length_and_widths(component_mask)
+                        if length <= 0 or not local_widths:
+                            continue
+                        lengths.append(length)
+                        secondary_values.append(float(np.median(local_widths)))
 
         if not lengths:
-            return 50, 150, 5, 15
+            return self._build_default_stats(defect_token)
 
-        min_l, max_l = int(np.percentile(lengths, 10)), int(np.percentile(lengths, 90))
-        min_t, max_t = int(np.percentile(thicknesses, 10)), int(np.percentile(thicknesses, 90))
+        if is_tear_like:
+            stats = {
+                "kind": "tear",
+                "length": self._percentile_range(lengths, minimum=5, minimum_gap=10),
+                "width": self._percentile_range(secondary_values, minimum=2, minimum_gap=2),
+            }
+        else:
+            stats = {
+                "kind": "scratch",
+                "length": self._percentile_range(lengths, minimum=5, minimum_gap=10),
+                "thickness": self._percentile_range(secondary_values, minimum=2, minimum_gap=2),
+            }
 
-        print(
-            f"\n📈 [{defect_token}] 尺寸统计: 实例数 {len(lengths)} | "
-            f"Length [{min_l}, {max(min_l + 10, max_l)}] | Thick/Rad [{min_t}, {max(min_t + 2, max_t)}]"
-        )
-        return min_l, max(min_l + 10, max_l), min_t, max(min_t + 2, max_t)
+        self._print_stats_summary(defect_token, stats, sample_count=len(lengths))
+        return stats
 
     def load_or_compute_stats(self, tasks):
         unique_defects = {t["defect"] for t in tasks}
@@ -81,31 +232,47 @@ class DefectMaskEngine:
         if self.cache_file.exists():
             with open(self.cache_file, "r", encoding="utf-8") as f:
                 self.stats_cache = json.load(f)
-            if not [token for token in unique_defects if token not in self.stats_cache]:
+            missing_or_legacy = [
+                token for token in unique_defects
+                if token not in self.stats_cache or not self._is_structured_stats(self.stats_cache[token])
+            ]
+            if not missing_or_legacy:
                 return
 
         for token in unique_defects:
-            if token not in self.stats_cache:
+            if token not in self.stats_cache or not self._is_structured_stats(self.stats_cache[token]):
                 self.stats_cache[token] = self._compute_single_defect_stats(token)
 
         with open(self.cache_file, "w", encoding="utf-8") as f:
             json.dump(self.stats_cache, f, indent=4, ensure_ascii=False)
 
+    def _sample_stat(self, defect_stats, field_name, minimum):
+        field_stats = defect_stats[field_name]
+        low = max(minimum, int(field_stats["p10"]))
+        high = max(low, int(field_stats["p90"]))
+        return random.randint(low, high)
+
     def generate_dynamic_mask(self, comp_mask_np, defect_token):
-        min_l, max_l, min_t, max_t = self.stats_cache.get(defect_token, (50, 150, 5, 15))
+        defect_stats = self.stats_cache.get(defect_token, self._build_default_stats(defect_token))
         defect_mask = None
 
-        if "crack" in defect_token or "tear" in defect_token:
+        if defect_stats["kind"] == "tear":
             defect_mask = self._generate_flexible_printed_circuit_tear(
-                comp_mask_np, length=random.randint(min_l, max_l), width=random.randint(min_t, max_t)
+                comp_mask_np,
+                length=self._sample_stat(defect_stats, "length", minimum=5),
+                width=self._sample_stat(defect_stats, "width", minimum=2),
             )
-        elif "scratch" in defect_token:
+        elif defect_stats["kind"] == "scratch":
             defect_mask = self._generate_scratch(
-                comp_mask_np, length=random.randint(min_l, max_l), thickness=random.randint(min_t, max_t)
+                comp_mask_np,
+                length=self._sample_stat(defect_stats, "length", minimum=5),
+                thickness=self._sample_stat(defect_stats, "thickness", minimum=2),
             )
-        elif "particle" in defect_token:
+        elif defect_stats["kind"] == "particle":
             defect_mask = self._generate_particle(
-                comp_mask_np, radius=random.randint(min_t, max_t), count=random.randint(1, 3)
+                comp_mask_np,
+                radius=self._sample_stat(defect_stats, "radius", minimum=2),
+                count=self._sample_stat(defect_stats, "count", minimum=1),
             )
 
         if defect_mask is None or cv2.countNonZero(defect_mask) == 0:
@@ -113,7 +280,13 @@ class DefectMaskEngine:
             ys, xs = np.where(comp_mask_np > 0)
             if len(ys) > 0:
                 idx = random.randint(0, len(ys) - 1)
-                cv2.circle(defect_mask, (xs[idx], ys[idx]), max(3, min_t), 255, -1)
+                if defect_stats["kind"] == "particle":
+                    fallback_radius = self._sample_stat(defect_stats, "radius", minimum=2)
+                elif defect_stats["kind"] == "scratch":
+                    fallback_radius = self._sample_stat(defect_stats, "thickness", minimum=2)
+                else:
+                    fallback_radius = self._sample_stat(defect_stats, "width", minimum=2)
+                cv2.circle(defect_mask, (xs[idx], ys[idx]), max(3, fallback_radius), 255, -1)
 
         return defect_mask
 
