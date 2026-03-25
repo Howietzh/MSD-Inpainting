@@ -12,7 +12,7 @@ paths:
 
 inference:
   batch_size: 8                    # 【新增】每次从 DataLoader 抽取几张不同的正常图
-  num_lfs_samples: 2               # 针对每张图，生成 8 个样本做 LFS (低保真度) 优选
+  num_lfs_samples: 8               # 针对每张图，生成 8 个样本做 LFS (低保真度) 优选
   num_inference_steps: 30          
   guidance_scale: 7.5              
   negative_prompt: "blurry, smooth, unrealistic, artifacts" 
@@ -23,16 +23,16 @@ inference:
 tasks:
   - defect: "<flexible_printed_circuit_crack>"
     comp: "<flexible_printed_circuit>"
-    count: 20
+    count: 100
   - defect: "<end_face_scratch>"
     comp: "<end_face>"
-    count: 20
+    count: 100
   - defect: "<lens_scratch>"
     comp: "<lens>"
-    count: 20
+    count: 100
   - defect: "<foreign_particle>"
     comp: "<end_face>"
-    count: 20
+    count: 50
   - defect: "<foreign_particle>"
     comp: "<lens>"
-    count: 20
+    count: 50
