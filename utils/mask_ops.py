@@ -294,10 +294,11 @@ class DefectMaskEngine:
             "count": self._sample_stat(defect_stats, "count", minimum=1),
         }
 
-    def generate_dynamic_mask_with_params(self, comp_mask_np, defect_token, params):
+    def generate_dynamic_mask_with_params(self, comp_mask_np, defect_token, params, return_details=False):
         defect_stats = self.stats_cache.get(defect_token, self._build_default_stats(defect_token))
         kind = defect_stats["kind"]
         defect_mask = None
+        details = {"kind": kind}
 
         if kind == "tear":
             defect_mask = self._generate_flexible_printed_circuit_tear(
@@ -306,11 +307,12 @@ class DefectMaskEngine:
                 width=int(params["width"]),
             )
         elif kind == "scratch":
-            defect_mask = self._generate_scratch(
+            defect_mask, scratch_details = self._generate_scratch(
                 comp_mask_np,
                 length=int(params["length"]),
                 thickness=int(params["thickness"]),
             )
+            details.update(scratch_details)
         elif kind == "particle":
             defect_mask = self._generate_particle(
                 comp_mask_np,
@@ -330,7 +332,17 @@ class DefectMaskEngine:
                 else:
                     fallback_radius = max(2, int(params.get("width", 2)))
                 cv2.circle(defect_mask, (xs[idx], ys[idx]), max(3, fallback_radius), 255, -1)
+                if kind == "scratch":
+                    details.update({
+                        "requested_length": float(params.get("length", 0)),
+                        "actual_length": float(max(3, fallback_radius) * 2),
+                        "length_control_mode": "arc_length",
+                        "degraded": True,
+                        "fallback": True,
+                    })
 
+        if return_details:
+            return defect_mask, details
         return defect_mask
 
     def generate_dynamic_mask(self, comp_mask_np, defect_token):
@@ -343,6 +355,178 @@ class DefectMaskEngine:
         for i in range(n + 1):
             curve += np.outer(comb(n, i) * (1 - t) ** (n - i) * t ** i, points[i])
         return curve.astype(np.float32)
+
+    def _compute_polyline_arc_length(self, points):
+        if len(points) < 2:
+            return 0.0
+        deltas = np.diff(points.astype(np.float32), axis=0)
+        return float(np.linalg.norm(deltas, axis=1).sum())
+
+    def _compute_bezier_arc_length(self, control_points, num_points=120):
+        curve = self._bezier_curve(control_points, num_points=num_points)
+        return self._compute_polyline_arc_length(curve), curve
+
+    def _is_curve_inside_component(self, curve_points, comp_mask, thickness, dist_map=None):
+        if dist_map is None:
+            dist_map = cv2.distanceTransform(comp_mask, cv2.DIST_L2, 5)
+
+        clearance = max(1.5, float(thickness) / 2.0 + 1.0)
+        height, width = comp_mask.shape[:2]
+        for point in curve_points:
+            x = int(round(point[0]))
+            y = int(round(point[1]))
+            if x < 0 or x >= width or y < 0 or y >= height:
+                return False
+            if comp_mask[y, x] <= 0:
+                return False
+            if dist_map[y, x] < clearance:
+                return False
+        return True
+
+    def _sample_scratch_start_point(self, dist_map, thickness):
+        clearance = max(2.0, float(thickness) / 2.0 + 2.0)
+        safe_ys, safe_xs = np.where(dist_map >= clearance)
+        if len(safe_xs) == 0:
+            return None
+
+        weights = dist_map[safe_ys, safe_xs].astype(np.float64)
+        probs = (weights / weights.sum()) if weights.sum() > 0 else None
+        idx0 = np.random.choice(len(safe_xs), p=probs) if probs is not None else random.randint(0, len(safe_xs) - 1)
+        return np.array([safe_xs[idx0], safe_ys[idx0]], dtype=np.float32)
+
+    def _scan_scratch_directions_from_point(
+        self,
+        p0,
+        comp_mask,
+        dist_map,
+        thickness,
+        num_directions=32,
+        step_size=1.0,
+    ):
+        clearance = max(2.0, float(thickness) / 2.0 + 2.0)
+        height, width = comp_mask.shape[:2]
+        direction_results = []
+
+        for angle in np.linspace(0.0, 2.0 * np.pi, num_directions, endpoint=False):
+            direction = np.array([np.cos(angle), np.sin(angle)], dtype=np.float32)
+            last_valid_point = p0.copy()
+            traveled = 0.0
+
+            while True:
+                candidate = p0 + direction * (traveled + step_size)
+                x = int(round(candidate[0]))
+                y = int(round(candidate[1]))
+                if x < 0 or x >= width or y < 0 or y >= height:
+                    break
+                if comp_mask[y, x] <= 0 or dist_map[y, x] < clearance:
+                    break
+                traveled += step_size
+                last_valid_point = candidate.copy()
+
+            if traveled >= max(4.0, float(thickness) * 1.5):
+                direction_results.append(
+                    {
+                        "direction": direction,
+                        "max_length": float(traveled),
+                        "endpoint": last_valid_point.astype(np.float32),
+                    }
+                )
+
+        return direction_results
+
+    def _select_scratch_endpoint(self, p0, target_length, direction_results):
+        if not direction_results:
+            return None
+
+        chord_lower = max(4.0, float(target_length) * 0.45)
+        eligible = [item for item in direction_results if item["max_length"] >= chord_lower]
+        if not eligible:
+            eligible = direction_results
+
+        preferred = []
+        chord_target_low = float(target_length) * 0.75
+        chord_target_high = float(target_length) * 0.95
+        for item in eligible:
+            if item["max_length"] >= chord_target_low:
+                preferred.append(item)
+        candidates = preferred if preferred else eligible
+        chosen = random.choice(candidates)
+
+        chord_target = min(
+            chosen["max_length"],
+            max(chord_lower, min(chosen["max_length"], float(target_length) * random.uniform(0.78, 0.93))),
+        )
+        p2 = p0 + chosen["direction"] * chord_target
+        return p2.astype(np.float32), chosen
+
+    def _refine_control_point_for_target_arc_length(
+        self,
+        p0,
+        p2,
+        target_length,
+        comp_mask,
+        thickness,
+        dist_map,
+        curvature_ratio_init,
+        curvature_sign,
+        max_length_error_ratio=0.1,
+    ):
+        chord = float(np.linalg.norm(p2 - p0))
+        if chord <= 1e-6:
+            return None
+
+        target_length = max(float(target_length), chord)
+        midpoint = (p0 + p2) / 2.0
+        tangent = p2 - p0
+        perp = np.array([-tangent[1], tangent[0]], dtype=np.float32)
+        perp_norm = np.linalg.norm(perp)
+        if perp_norm <= 1e-6:
+            return None
+        perp /= perp_norm
+        perp *= float(curvature_sign)
+
+        best_result = None
+        initial_offset = max(0.0, float(curvature_ratio_init) * chord)
+        max_offset = max(initial_offset * 2.0, max(target_length, chord) * 1.25)
+        low, high = 0.0, max_offset
+
+        for _ in range(18):
+            if initial_offset > 0 and _ == 0:
+                offset = min(initial_offset, max_offset)
+            else:
+                offset = (low + high) / 2.0
+            p1 = midpoint + perp * offset
+            arc_length, curve = self._compute_bezier_arc_length([p0, p1, p2])
+            inside = self._is_curve_inside_component(curve, comp_mask, thickness, dist_map=dist_map)
+            error = abs(arc_length - target_length)
+            candidate = {
+                "control_point": p1,
+                "curve": curve,
+                "arc_length": arc_length,
+                "inside": inside,
+                "error": error,
+                "curvature_sign": int(curvature_sign),
+                "curvature_ratio": float(offset / chord) if chord > 1e-6 else 0.0,
+            }
+
+            if best_result is None:
+                best_result = candidate
+            else:
+                if inside and not best_result["inside"]:
+                    best_result = candidate
+                elif inside == best_result["inside"] and error < best_result["error"]:
+                    best_result = candidate
+
+            if not inside or arc_length > target_length:
+                high = offset
+            else:
+                low = offset
+
+        if best_result is None or not best_result["inside"]:
+            return None
+
+        best_result["degraded"] = best_result["error"] > (target_length * max_length_error_ratio)
+        return best_result
 
     def _draw_variable_thickness_poly(self, points, max_thickness, roughness=0.3):
         defect = np.zeros(self.shape, dtype=np.uint8)
@@ -363,28 +547,84 @@ class DefectMaskEngine:
 
     def _generate_scratch(self, comp_mask, length=200, thickness=5, margin=10, curvature=50):
         dist_map = cv2.distanceTransform(comp_mask, cv2.DIST_L2, 5)
-        safe_ys, safe_xs = np.where(dist_map > (margin + thickness))
-        if len(safe_xs) == 0:
-            return np.zeros(self.shape, dtype=np.uint8)
+        target_length = max(5.0, float(length))
+        thickness = max(1, int(thickness))
+        best_candidate = None
+        max_attempts = 32
 
-        weights = dist_map[safe_ys, safe_xs]
-        idx = (
-            np.random.choice(len(safe_xs), p=weights / np.sum(weights))
-            if np.sum(weights) > 0
-            else random.randint(0, len(safe_xs) - 1)
-        )
-        p0 = [safe_xs[idx], safe_ys[idx]]
-        ang = random.uniform(0, 2 * np.pi)
-        p2 = [p0[0] + length * np.cos(ang), p0[1] + length * np.sin(ang)]
-        p1 = [
-            (p0[0] + p2[0]) / 2 + random.randint(-int(curvature), int(curvature)),
-            (p0[1] + p2[1]) / 2 + random.randint(-int(curvature), int(curvature)),
-        ]
+        for _ in range(max_attempts):
+            p0 = self._sample_scratch_start_point(dist_map, thickness=thickness)
+            if p0 is None:
+                break
 
-        return cv2.bitwise_and(
-            self._draw_variable_thickness_poly(self._bezier_curve([p0, p1, p2]), thickness),
+            direction_results = self._scan_scratch_directions_from_point(
+                p0=p0,
+                comp_mask=comp_mask,
+                dist_map=dist_map,
+                thickness=thickness,
+                num_directions=32,
+                step_size=1.0,
+            )
+            endpoint_result = self._select_scratch_endpoint(p0, target_length, direction_results)
+            if endpoint_result is None:
+                continue
+
+            p2, direction_info = endpoint_result
+            curvature_sign = random.choice([-1, 1])
+            curvature_ratio_init = random.uniform(0.05, 0.35)
+            candidate = self._refine_control_point_for_target_arc_length(
+                p0=p0,
+                p2=p2,
+                target_length=target_length,
+                comp_mask=comp_mask,
+                thickness=thickness,
+                dist_map=dist_map,
+                curvature_ratio_init=curvature_ratio_init,
+                curvature_sign=curvature_sign,
+                max_length_error_ratio=0.1,
+            )
+            if candidate is None:
+                continue
+
+            candidate["direction_angle_deg"] = float(
+                np.degrees(np.arctan2(direction_info["direction"][1], direction_info["direction"][0]))
+            )
+            candidate["chord_length"] = float(np.linalg.norm(p2 - p0))
+
+            if best_candidate is None or candidate["error"] < best_candidate["error"]:
+                best_candidate = candidate
+            if not candidate["degraded"]:
+                break
+
+        if best_candidate is None:
+            return np.zeros(self.shape, dtype=np.uint8), {
+                "requested_length": target_length,
+                "actual_length": 0.0,
+                "length_control_mode": "arc_length",
+                "degraded": True,
+                "fallback": True,
+            }
+
+        defect_mask = cv2.bitwise_and(
+            self._draw_variable_thickness_poly(best_candidate["curve"], thickness),
             comp_mask,
         )
+        start_point = best_candidate["curve"][0]
+        end_point = best_candidate["curve"][-1]
+        details = {
+            "requested_length": target_length,
+            "actual_length": float(best_candidate["arc_length"]),
+            "length_control_mode": "arc_length",
+            "degraded": bool(best_candidate["degraded"]),
+            "fallback": False,
+            "start_point": [float(start_point[0]), float(start_point[1])],
+            "end_point": [float(end_point[0]), float(end_point[1])],
+            "curvature_sign": int(best_candidate["curvature_sign"]),
+            "curvature_ratio": float(best_candidate["curvature_ratio"]),
+            "direction_angle_deg": float(best_candidate["direction_angle_deg"]),
+            "chord_length": float(best_candidate["chord_length"]),
+        }
+        return defect_mask, details
 
     def _generate_particle(self, comp_mask, radius=10, count=3):
         defect = np.zeros(self.shape, dtype=np.uint8)

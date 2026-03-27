@@ -317,7 +317,12 @@ class InteractiveDefectFillEngine:
             radius,
             count,
         )
-        defect_mask_np = self.mask_engine.generate_dynamic_mask_with_params(comp_mask_np, defect_token, actual_params)
+        defect_mask_np, mask_details = self.mask_engine.generate_dynamic_mask_with_params(
+            comp_mask_np,
+            defect_token,
+            actual_params,
+            return_details=True,
+        )
         defect_mask_pil = Image.fromarray(defect_mask_np, mode="L")
         _, overlay_image = self._build_visualization(image_np, defect_mask_np, image)
 
@@ -331,6 +336,7 @@ class InteractiveDefectFillEngine:
             "refresh_index": int(refresh_index),
             "random_use_cache_range": bool(random_use_cache_range),
             "mask_params": actual_params,
+            "mask_details": mask_details,
             "defect_mask": defect_mask_np.tolist(),
         }
 
@@ -346,6 +352,8 @@ class InteractiveDefectFillEngine:
             "random_use_cache_range": bool(random_use_cache_range),
             "mask_params": actual_params,
         }
+        if mask_details:
+            info.update(mask_details)
 
         return {
             "original": image,
@@ -424,6 +432,8 @@ class InteractiveDefectFillEngine:
             "best_candidate_index": best_idx,
             "best_score": best_score,
         }
+        if mask_payload.get("mask_details"):
+            info.update(mask_payload["mask_details"])
 
         return {
             "original": image,
