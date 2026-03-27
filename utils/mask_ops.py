@@ -54,6 +54,10 @@ class DefectMaskEngine:
     def _is_structured_stats(self, stats):
         return isinstance(stats, dict) and "kind" in stats
 
+    def get_defect_kind(self, defect_token):
+        defect_stats = self.stats_cache.get(defect_token, self._build_default_stats(defect_token))
+        return defect_stats["kind"]
+
     def _percentile_range(self, values, minimum, minimum_gap=0):
         if not values:
             return {"p10": minimum, "p90": max(minimum, minimum + minimum_gap)}
@@ -252,27 +256,66 @@ class DefectMaskEngine:
         high = max(low, int(field_stats["p90"]))
         return random.randint(low, high)
 
-    def generate_dynamic_mask(self, comp_mask_np, defect_token):
+    def get_default_param_values(self, defect_token):
         defect_stats = self.stats_cache.get(defect_token, self._build_default_stats(defect_token))
+        kind = defect_stats["kind"]
+
+        if kind == "scratch":
+            return {
+                "length": int((defect_stats["length"]["p10"] + defect_stats["length"]["p90"]) / 2),
+                "thickness": int((defect_stats["thickness"]["p10"] + defect_stats["thickness"]["p90"]) / 2),
+            }
+        if kind == "tear":
+            return {
+                "length": int((defect_stats["length"]["p10"] + defect_stats["length"]["p90"]) / 2),
+                "width": int((defect_stats["width"]["p10"] + defect_stats["width"]["p90"]) / 2),
+            }
+        return {
+            "radius": int((defect_stats["radius"]["p10"] + defect_stats["radius"]["p90"]) / 2),
+            "count": int((defect_stats["count"]["p10"] + defect_stats["count"]["p90"]) / 2),
+        }
+
+    def sample_generation_params(self, defect_token):
+        defect_stats = self.stats_cache.get(defect_token, self._build_default_stats(defect_token))
+        kind = defect_stats["kind"]
+
+        if kind == "tear":
+            return {
+                "length": self._sample_stat(defect_stats, "length", minimum=5),
+                "width": self._sample_stat(defect_stats, "width", minimum=2),
+            }
+        if kind == "scratch":
+            return {
+                "length": self._sample_stat(defect_stats, "length", minimum=5),
+                "thickness": self._sample_stat(defect_stats, "thickness", minimum=2),
+            }
+        return {
+            "radius": self._sample_stat(defect_stats, "radius", minimum=2),
+            "count": self._sample_stat(defect_stats, "count", minimum=1),
+        }
+
+    def generate_dynamic_mask_with_params(self, comp_mask_np, defect_token, params):
+        defect_stats = self.stats_cache.get(defect_token, self._build_default_stats(defect_token))
+        kind = defect_stats["kind"]
         defect_mask = None
 
-        if defect_stats["kind"] == "tear":
+        if kind == "tear":
             defect_mask = self._generate_flexible_printed_circuit_tear(
                 comp_mask_np,
-                length=self._sample_stat(defect_stats, "length", minimum=5),
-                width=self._sample_stat(defect_stats, "width", minimum=2),
+                length=int(params["length"]),
+                width=int(params["width"]),
             )
-        elif defect_stats["kind"] == "scratch":
+        elif kind == "scratch":
             defect_mask = self._generate_scratch(
                 comp_mask_np,
-                length=self._sample_stat(defect_stats, "length", minimum=5),
-                thickness=self._sample_stat(defect_stats, "thickness", minimum=2),
+                length=int(params["length"]),
+                thickness=int(params["thickness"]),
             )
-        elif defect_stats["kind"] == "particle":
+        elif kind == "particle":
             defect_mask = self._generate_particle(
                 comp_mask_np,
-                radius=self._sample_stat(defect_stats, "radius", minimum=2),
-                count=self._sample_stat(defect_stats, "count", minimum=1),
+                radius=int(params["radius"]),
+                count=int(params["count"]),
             )
 
         if defect_mask is None or cv2.countNonZero(defect_mask) == 0:
@@ -280,15 +323,19 @@ class DefectMaskEngine:
             ys, xs = np.where(comp_mask_np > 0)
             if len(ys) > 0:
                 idx = random.randint(0, len(ys) - 1)
-                if defect_stats["kind"] == "particle":
-                    fallback_radius = self._sample_stat(defect_stats, "radius", minimum=2)
-                elif defect_stats["kind"] == "scratch":
-                    fallback_radius = self._sample_stat(defect_stats, "thickness", minimum=2)
+                if kind == "particle":
+                    fallback_radius = max(2, int(params.get("radius", 2)))
+                elif kind == "scratch":
+                    fallback_radius = max(2, int(params.get("thickness", 2)))
                 else:
-                    fallback_radius = self._sample_stat(defect_stats, "width", minimum=2)
+                    fallback_radius = max(2, int(params.get("width", 2)))
                 cv2.circle(defect_mask, (xs[idx], ys[idx]), max(3, fallback_radius), 255, -1)
 
         return defect_mask
+
+    def generate_dynamic_mask(self, comp_mask_np, defect_token):
+        params = self.sample_generation_params(defect_token)
+        return self.generate_dynamic_mask_with_params(comp_mask_np, defect_token, params)
 
     def _bezier_curve(self, points, num_points=100):
         n, t = len(points) - 1, np.linspace(0.0, 1.0, num_points)
