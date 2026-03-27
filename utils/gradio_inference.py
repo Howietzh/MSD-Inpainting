@@ -55,6 +55,7 @@ class InteractiveDefectFillEngine:
 
         self.component_tokens = list(self.train_config.get("component_tokens", []))
         self.defect_tokens = list(self.train_config.get("defect_tokens", []))
+        self.valid_defects_by_component = self._build_valid_defects_by_component()
         self.mask_engine = DefectMaskEngine(
             train_dir=Path(self.paths["train_dir"]),
             cache_file=Path(self.paths["stats_cache"]),
@@ -120,11 +121,23 @@ class InteractiveDefectFillEngine:
                 grouped[object_token].append(record)
         return grouped
 
+    def _build_valid_defects_by_component(self):
+        mapping = {token: [] for token in self.component_tokens}
+        for task in self.infer_config_full.get("tasks", []):
+            component = task.get("comp")
+            defect = task.get("defect")
+            if component in mapping and defect and defect not in mapping[component]:
+                mapping[component].append(defect)
+        return mapping
+
     def get_component_choices(self):
         return self.component_tokens
 
-    def get_defect_choices(self):
-        return self.defect_tokens
+    def get_defect_choices(self, component_token=None):
+        if component_token is None:
+            return self.defect_tokens
+        filtered = self.valid_defects_by_component.get(component_token, [])
+        return filtered or self.defect_tokens
 
     def get_normal_image_choices(self, component_token):
         records = self.normal_records_by_component.get(component_token, [])

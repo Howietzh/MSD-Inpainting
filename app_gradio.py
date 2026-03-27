@@ -50,6 +50,9 @@ def slider_hidden():
 
 
 def build_param_updates(engine, defect_token):
+    if engine is None or not defect_token:
+        return slider_hidden(), slider_hidden(), slider_hidden(), slider_hidden(), slider_hidden()
+
     spec = engine.get_param_spec(defect_token)
     kind = spec["kind"]
 
@@ -128,11 +131,27 @@ def preview_record(engine, component_token, selected_image_path, use_random_imag
 
 def on_component_change(engine, component_token, use_random_image, base_seed):
     if engine is None:
-        return gr.update(choices=[], value=None), None, None
+        return (
+            gr.update(choices=[], value=None),
+            gr.update(choices=[], value=None),
+            None,
+            None,
+            *build_param_updates(None, None),
+        )
 
     choices = engine.get_normal_image_choices(component_token)
+    defect_choices = engine.get_defect_choices(component_token)
+    selected_defect = defect_choices[0] if defect_choices else None
+    param_updates = build_param_updates(engine, selected_defect)
+
     if not choices:
-        return gr.update(choices=[], value=None), None, None
+        return (
+            gr.update(choices=defect_choices, value=selected_defect),
+            gr.update(choices=[], value=None),
+            None,
+            None,
+            *param_updates,
+        )
 
     preview_image, preview_mask, actual_image_path = engine.preview_record(
         component_token=component_token,
@@ -140,7 +159,13 @@ def on_component_change(engine, component_token, use_random_image, base_seed):
         use_random_image=use_random_image,
         base_seed=base_seed,
     )
-    return gr.update(choices=choices, value=actual_image_path), preview_image, preview_mask
+    return (
+        gr.update(choices=defect_choices, value=selected_defect),
+        gr.update(choices=choices, value=actual_image_path),
+        preview_image,
+        preview_mask,
+        *param_updates,
+    )
 
 
 def clear_generation_state():
@@ -161,7 +186,7 @@ def load_engine(train_config, infer_config, lora_weights, normal_dir, stats_cach
         raise gr.Error(str(exc)) from exc
 
     component_choices = engine.get_component_choices()
-    defect_choices = engine.get_defect_choices()
+    defect_choices = engine.get_defect_choices(selected_component)
     selected_component = component_choices[0] if component_choices else None
     selected_defect = defect_choices[0] if defect_choices else None
 
@@ -356,7 +381,7 @@ def create_demo(initial_values):
         component_token.change(
             fn=on_component_change,
             inputs=[engine_state, component_token, use_random_image, base_seed],
-            outputs=[normal_image_path, original_image, component_mask],
+            outputs=[defect_token, normal_image_path, original_image, component_mask, length_slider, thickness_slider, width_slider, radius_slider, count_slider],
         ).then(
             fn=clear_generation_state,
             outputs=[mask_state, defect_mask, defect_overlay, candidate_gallery, best_image, triptych_image, info_json],
@@ -381,7 +406,7 @@ def create_demo(initial_values):
         )
 
         defect_token.change(
-            fn=lambda engine, defect: build_param_updates(engine, defect),
+            fn=build_param_updates,
             inputs=[engine_state, defect_token],
             outputs=[length_slider, thickness_slider, width_slider, radius_slider, count_slider],
         ).then(
