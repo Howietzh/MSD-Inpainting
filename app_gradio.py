@@ -143,6 +143,10 @@ def on_component_change(engine, component_token, use_random_image, base_seed):
     return gr.update(choices=choices, value=actual_image_path), preview_image, preview_mask
 
 
+def clear_generation_state():
+    return None, None, None, [], None, None, {}
+
+
 def load_engine(train_config, infer_config, lora_weights, normal_dir, stats_cache, device, base_seed):
     try:
         engine = InteractiveDefectFillEngine(
@@ -185,6 +189,7 @@ def load_engine(train_config, infer_config, lora_weights, normal_dir, stats_cach
 
     return (
         engine,
+        None,
         status,
         gr.update(choices=component_choices, value=selected_component),
         gr.update(choices=defect_choices, value=selected_defect),
@@ -195,43 +200,67 @@ def load_engine(train_config, infer_config, lora_weights, normal_dir, stats_cach
     )
 
 
-def generate_result(
+def generate_mask(
     engine,
     component_token,
     defect_token,
     selected_image_path,
     use_random_image,
-    random_use_cache_range,
-    num_inference_steps,
-    guidance_scale,
-    negative_prompt,
     base_seed,
-    num_lfs_samples,
     length,
     thickness,
     width,
     radius,
     count,
+    random_use_cache_range,
 ):
     if engine is None:
         raise gr.Error("请先加载模型与数据。")
 
-    result = engine.generate(
+    result = engine.generate_mask_preview(
         component_token=component_token,
         defect_token=defect_token,
         selected_image_path=selected_image_path,
         use_random_image=use_random_image,
-        random_use_cache_range=random_use_cache_range,
-        num_inference_steps=num_inference_steps,
-        guidance_scale=guidance_scale,
-        negative_prompt=negative_prompt,
         base_seed=base_seed,
-        num_lfs_samples=num_lfs_samples,
         length=length,
         thickness=thickness,
         width=width,
         radius=radius,
         count=count,
+        random_use_cache_range=random_use_cache_range,
+    )
+    return (
+        result["mask_payload"],
+        gr.update(value=result["selected_image_path"]),
+        result["original"],
+        result["component_mask"],
+        result["defect_mask"],
+        result["overlay"],
+        [],
+        None,
+        None,
+        result["info"],
+    )
+
+
+def generate_result(
+    engine,
+    mask_state,
+    num_inference_steps,
+    guidance_scale,
+    negative_prompt,
+    num_lfs_samples,
+):
+    if engine is None:
+        raise gr.Error("请先加载模型与数据。")
+
+    result = engine.generate_from_mask(
+        mask_payload=mask_state,
+        num_inference_steps=num_inference_steps,
+        guidance_scale=guidance_scale,
+        negative_prompt=negative_prompt,
+        num_lfs_samples=num_lfs_samples,
     )
     return (
         gr.update(value=result["selected_image_path"]),
@@ -249,6 +278,7 @@ def generate_result(
 def create_demo(initial_values):
     with gr.Blocks(title="DefectFill Gradio Demo") as demo:
         engine_state = gr.State(value=None)
+        mask_state = gr.State(value=None)
 
         gr.Markdown("# DefectFill 单样本实时生成可视化")
 
@@ -283,7 +313,8 @@ def create_demo(initial_values):
                 width_slider = gr.Slider(label="Width", minimum=1, maximum=30, step=1, value=5, visible=False)
                 radius_slider = gr.Slider(label="Radius", minimum=1, maximum=30, step=1, value=5, visible=False)
                 count_slider = gr.Slider(label="Count", minimum=1, maximum=10, step=1, value=1, visible=False)
-                generate_button = gr.Button("开始生成", variant="primary")
+                generate_mask_button = gr.Button("生成 / 刷新 Mask")
+                generate_button = gr.Button("开始缺陷生成", variant="primary")
 
             with gr.Column(scale=2):
                 gr.Markdown("## 过程展示")
@@ -304,6 +335,7 @@ def create_demo(initial_values):
             inputs=[train_config, infer_config, lora_weights, normal_dir, stats_cache, device, base_seed],
             outputs=[
                 engine_state,
+                mask_state,
                 load_status,
                 component_token,
                 defect_token,
@@ -316,51 +348,86 @@ def create_demo(initial_values):
                 radius_slider,
                 count_slider,
             ],
+        ).then(
+            fn=clear_generation_state,
+            outputs=[mask_state, defect_mask, defect_overlay, candidate_gallery, best_image, triptych_image, info_json],
         )
 
         component_token.change(
             fn=on_component_change,
             inputs=[engine_state, component_token, use_random_image, base_seed],
             outputs=[normal_image_path, original_image, component_mask],
+        ).then(
+            fn=clear_generation_state,
+            outputs=[mask_state, defect_mask, defect_overlay, candidate_gallery, best_image, triptych_image, info_json],
         )
 
         normal_image_path.change(
             fn=preview_record,
             inputs=[engine_state, component_token, normal_image_path, use_random_image, base_seed],
             outputs=[normal_image_path, original_image, component_mask],
+        ).then(
+            fn=clear_generation_state,
+            outputs=[mask_state, defect_mask, defect_overlay, candidate_gallery, best_image, triptych_image, info_json],
         )
 
         preview_button.click(
             fn=preview_record,
             inputs=[engine_state, component_token, normal_image_path, use_random_image, base_seed],
             outputs=[normal_image_path, original_image, component_mask],
+        ).then(
+            fn=clear_generation_state,
+            outputs=[mask_state, defect_mask, defect_overlay, candidate_gallery, best_image, triptych_image, info_json],
         )
 
         defect_token.change(
             fn=lambda engine, defect: build_param_updates(engine, defect),
             inputs=[engine_state, defect_token],
             outputs=[length_slider, thickness_slider, width_slider, radius_slider, count_slider],
+        ).then(
+            fn=clear_generation_state,
+            outputs=[mask_state, defect_mask, defect_overlay, candidate_gallery, best_image, triptych_image, info_json],
         )
 
-        generate_button.click(
-            fn=generate_result,
+        generate_mask_button.click(
+            fn=generate_mask,
             inputs=[
                 engine_state,
                 component_token,
                 defect_token,
                 normal_image_path,
                 use_random_image,
-                random_use_cache_range,
-                num_inference_steps,
-                guidance_scale,
-                negative_prompt,
                 base_seed,
-                num_lfs_samples,
                 length_slider,
                 thickness_slider,
                 width_slider,
                 radius_slider,
                 count_slider,
+                random_use_cache_range,
+            ],
+            outputs=[
+                mask_state,
+                normal_image_path,
+                original_image,
+                component_mask,
+                defect_mask,
+                defect_overlay,
+                candidate_gallery,
+                best_image,
+                triptych_image,
+                info_json,
+            ],
+        )
+
+        generate_button.click(
+            fn=generate_result,
+            inputs=[
+                engine_state,
+                mask_state,
+                num_inference_steps,
+                guidance_scale,
+                negative_prompt,
+                num_lfs_samples,
             ],
             outputs=[
                 normal_image_path,

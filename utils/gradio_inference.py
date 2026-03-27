@@ -252,23 +252,39 @@ class InteractiveDefectFillEngine:
     def _build_image_tensor(self, image):
         return self.image_transform(image).unsqueeze(0)
 
-    def generate(
+    def _resolve_actual_params(
         self,
-        component_token,
         defect_token,
-        selected_image_path,
-        use_random_image,
         random_use_cache_range,
-        num_inference_steps,
-        guidance_scale,
-        negative_prompt,
-        base_seed,
-        num_lfs_samples,
         length,
         thickness,
         width,
         radius,
         count,
+    ):
+        if random_use_cache_range:
+            return self.mask_engine.sample_generation_params(defect_token)
+
+        kind = self.mask_engine.get_defect_kind(defect_token)
+        if kind == "scratch":
+            return {"length": int(length), "thickness": int(thickness)}
+        if kind == "tear":
+            return {"length": int(length), "width": int(width)}
+        return {"radius": int(radius), "count": int(count)}
+
+    def generate_mask_preview(
+        self,
+        component_token,
+        defect_token,
+        selected_image_path,
+        use_random_image,
+        base_seed,
+        length,
+        thickness,
+        width,
+        radius,
+        count,
+        random_use_cache_range,
     ):
         record = self._select_record(component_token, selected_image_path, use_random_image, base_seed)
         image, component_mask, image_np, comp_mask_np = self._load_record_assets(record)
@@ -277,23 +293,76 @@ class InteractiveDefectFillEngine:
         np.random.seed(int(base_seed))
         torch.manual_seed(int(base_seed))
 
-        if random_use_cache_range:
-            actual_params = self.mask_engine.sample_generation_params(defect_token)
-        else:
-            kind = self.mask_engine.get_defect_kind(defect_token)
-            if kind == "scratch":
-                actual_params = {"length": int(length), "thickness": int(thickness)}
-            elif kind == "tear":
-                actual_params = {"length": int(length), "width": int(width)}
-            else:
-                actual_params = {"radius": int(radius), "count": int(count)}
-
+        actual_params = self._resolve_actual_params(
+            defect_token,
+            random_use_cache_range,
+            length,
+            thickness,
+            width,
+            radius,
+            count,
+        )
         defect_mask_np = self.mask_engine.generate_dynamic_mask_with_params(comp_mask_np, defect_token, actual_params)
         defect_mask_pil = Image.fromarray(defect_mask_np, mode="L")
+        _, overlay_image = self._build_visualization(image_np, defect_mask_np, image)
 
+        mask_payload = {
+            "component_token": component_token,
+            "defect_token": defect_token,
+            "selected_image_path": record["image_path"],
+            "prompt": f"a photo of {component_token} with {defect_token}",
+            "seed": int(base_seed),
+            "random_use_cache_range": bool(random_use_cache_range),
+            "mask_params": actual_params,
+            "defect_mask": defect_mask_np.tolist(),
+        }
+
+        info = {
+            "stage": "mask_ready",
+            "object_token": component_token,
+            "defect_token": defect_token,
+            "normal_image_path": record["image_path"],
+            "prompt": mask_payload["prompt"],
+            "seed": int(base_seed),
+            "random_use_cache_range": bool(random_use_cache_range),
+            "mask_params": actual_params,
+        }
+
+        return {
+            "original": image,
+            "component_mask": component_mask,
+            "defect_mask": defect_mask_pil,
+            "overlay": overlay_image,
+            "info": info,
+            "mask_payload": mask_payload,
+            "selected_image_path": record["image_path"],
+        }
+
+    def generate_from_mask(
+        self,
+        mask_payload,
+        num_inference_steps,
+        guidance_scale,
+        negative_prompt,
+        num_lfs_samples,
+    ):
+        if not mask_payload:
+            raise ValueError("请先生成并确认 defect mask。")
+
+        component_token = mask_payload["component_token"]
+        defect_token = mask_payload["defect_token"]
+        record = self._select_record(
+            component_token=component_token,
+            selected_image_path=mask_payload["selected_image_path"],
+            use_random_image=False,
+            base_seed=mask_payload["seed"],
+        )
+        image, component_mask, image_np, _ = self._load_record_assets(record)
+        defect_mask_np = np.array(mask_payload["defect_mask"], dtype=np.uint8)
+        defect_mask_pil = Image.fromarray(defect_mask_np, mode="L")
         init_img_tensor = self._build_image_tensor(image).to(self.device, dtype=self.weight_dtype)
         mask_tensor = self._build_mask_tensor(defect_mask_np).to(self.device, dtype=self.weight_dtype)
-        prompt = f"a photo of {component_token} with {defect_token}"
+        prompt = mask_payload["prompt"]
 
         candidate_gallery = []
         candidate_scores = []
@@ -302,7 +371,7 @@ class InteractiveDefectFillEngine:
         best_score = float("-inf")
 
         for sample_idx in range(int(num_lfs_samples)):
-            generator = torch.Generator(device=self.device).manual_seed(int(base_seed) + sample_idx)
+            generator = torch.Generator(device=self.device).manual_seed(int(mask_payload["seed"]) + sample_idx)
             output_image = self.pipe(
                 prompt=[prompt],
                 negative_prompt=[negative_prompt],
@@ -324,13 +393,14 @@ class InteractiveDefectFillEngine:
         best_image = candidate_images[best_idx]
         triptych, overlay_image = self._build_visualization(image_np, defect_mask_np, best_image)
         info = {
+            "stage": "generation_done",
             "object_token": component_token,
             "defect_token": defect_token,
             "normal_image_path": record["image_path"],
             "prompt": prompt,
-            "seed": int(base_seed),
-            "random_use_cache_range": bool(random_use_cache_range),
-            "mask_params": actual_params,
+            "seed": int(mask_payload["seed"]),
+            "random_use_cache_range": bool(mask_payload["random_use_cache_range"]),
+            "mask_params": mask_payload["mask_params"],
             "candidate_scores": candidate_scores,
             "best_candidate_index": best_idx,
             "best_score": best_score,
