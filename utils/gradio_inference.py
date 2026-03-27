@@ -292,6 +292,7 @@ class InteractiveDefectFillEngine:
         selected_image_path,
         use_random_image,
         base_seed,
+        refresh_index,
         length,
         thickness,
         width,
@@ -302,9 +303,10 @@ class InteractiveDefectFillEngine:
         record = self._select_record(component_token, selected_image_path, use_random_image, base_seed)
         image, component_mask, image_np, comp_mask_np = self._load_record_assets(record)
 
-        random.seed(int(base_seed))
-        np.random.seed(int(base_seed))
-        torch.manual_seed(int(base_seed))
+        mask_seed = int(base_seed) + int(refresh_index)
+        random.seed(mask_seed)
+        np.random.seed(mask_seed)
+        torch.manual_seed(mask_seed)
 
         actual_params = self._resolve_actual_params(
             defect_token,
@@ -325,6 +327,8 @@ class InteractiveDefectFillEngine:
             "selected_image_path": record["image_path"],
             "prompt": f"a photo of {component_token} with {defect_token}",
             "seed": int(base_seed),
+            "mask_seed": mask_seed,
+            "refresh_index": int(refresh_index),
             "random_use_cache_range": bool(random_use_cache_range),
             "mask_params": actual_params,
             "defect_mask": defect_mask_np.tolist(),
@@ -337,6 +341,8 @@ class InteractiveDefectFillEngine:
             "normal_image_path": record["image_path"],
             "prompt": mask_payload["prompt"],
             "seed": int(base_seed),
+            "mask_seed": mask_seed,
+            "refresh_index": int(refresh_index),
             "random_use_cache_range": bool(random_use_cache_range),
             "mask_params": actual_params,
         }

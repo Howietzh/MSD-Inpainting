@@ -169,7 +169,11 @@ def on_component_change(engine, component_token, use_random_image, base_seed):
 
 
 def clear_generation_state():
-    return None, None, None, [], None, None, {}
+    return None, None, None, [], None, None, {"stage": "mask_invalidated", "message": "输入或参数已变化，请先重新生成 / 刷新 Mask。"}
+
+
+def reset_mask_refresh_state():
+    return 0
 
 
 def load_engine(train_config, infer_config, lora_weights, normal_dir, stats_cache, device, base_seed):
@@ -215,6 +219,7 @@ def load_engine(train_config, infer_config, lora_weights, normal_dir, stats_cach
     return (
         engine,
         None,
+        0,
         status,
         gr.update(choices=component_choices, value=selected_component),
         gr.update(choices=defect_choices, value=selected_defect),
@@ -232,6 +237,7 @@ def generate_mask(
     selected_image_path,
     use_random_image,
     base_seed,
+    mask_refresh_state,
     length,
     thickness,
     width,
@@ -248,6 +254,7 @@ def generate_mask(
         selected_image_path=selected_image_path,
         use_random_image=use_random_image,
         base_seed=base_seed,
+        refresh_index=mask_refresh_state,
         length=length,
         thickness=thickness,
         width=width,
@@ -257,6 +264,7 @@ def generate_mask(
     )
     return (
         result["mask_payload"],
+        int(mask_refresh_state) + 1,
         gr.update(value=result["selected_image_path"]),
         result["original"],
         result["component_mask"],
@@ -304,6 +312,7 @@ def create_demo(initial_values):
     with gr.Blocks(title="DefectFill Gradio Demo") as demo:
         engine_state = gr.State(value=None)
         mask_state = gr.State(value=None)
+        mask_refresh_state = gr.State(value=0)
 
         gr.Markdown("# DefectFill 单样本实时生成可视化")
 
@@ -361,6 +370,7 @@ def create_demo(initial_values):
             outputs=[
                 engine_state,
                 mask_state,
+                mask_refresh_state,
                 load_status,
                 component_token,
                 defect_token,
@@ -376,6 +386,9 @@ def create_demo(initial_values):
         ).then(
             fn=clear_generation_state,
             outputs=[mask_state, defect_mask, defect_overlay, candidate_gallery, best_image, triptych_image, info_json],
+        ).then(
+            fn=reset_mask_refresh_state,
+            outputs=[mask_refresh_state],
         )
 
         component_token.change(
@@ -385,6 +398,9 @@ def create_demo(initial_values):
         ).then(
             fn=clear_generation_state,
             outputs=[mask_state, defect_mask, defect_overlay, candidate_gallery, best_image, triptych_image, info_json],
+        ).then(
+            fn=reset_mask_refresh_state,
+            outputs=[mask_refresh_state],
         )
 
         normal_image_path.change(
@@ -394,6 +410,9 @@ def create_demo(initial_values):
         ).then(
             fn=clear_generation_state,
             outputs=[mask_state, defect_mask, defect_overlay, candidate_gallery, best_image, triptych_image, info_json],
+        ).then(
+            fn=reset_mask_refresh_state,
+            outputs=[mask_refresh_state],
         )
 
         preview_button.click(
@@ -403,6 +422,9 @@ def create_demo(initial_values):
         ).then(
             fn=clear_generation_state,
             outputs=[mask_state, defect_mask, defect_overlay, candidate_gallery, best_image, triptych_image, info_json],
+        ).then(
+            fn=reset_mask_refresh_state,
+            outputs=[mask_refresh_state],
         )
 
         defect_token.change(
@@ -412,7 +434,19 @@ def create_demo(initial_values):
         ).then(
             fn=clear_generation_state,
             outputs=[mask_state, defect_mask, defect_overlay, candidate_gallery, best_image, triptych_image, info_json],
+        ).then(
+            fn=reset_mask_refresh_state,
+            outputs=[mask_refresh_state],
         )
+
+        for control in [use_random_image, random_use_cache_range, base_seed, length_slider, thickness_slider, width_slider, radius_slider, count_slider]:
+            control.change(
+                fn=clear_generation_state,
+                outputs=[mask_state, defect_mask, defect_overlay, candidate_gallery, best_image, triptych_image, info_json],
+            ).then(
+                fn=reset_mask_refresh_state,
+                outputs=[mask_refresh_state],
+            )
 
         generate_mask_button.click(
             fn=generate_mask,
@@ -423,6 +457,7 @@ def create_demo(initial_values):
                 normal_image_path,
                 use_random_image,
                 base_seed,
+                mask_refresh_state,
                 length_slider,
                 thickness_slider,
                 width_slider,
@@ -432,6 +467,7 @@ def create_demo(initial_values):
             ],
             outputs=[
                 mask_state,
+                mask_refresh_state,
                 normal_image_path,
                 original_image,
                 component_mask,
