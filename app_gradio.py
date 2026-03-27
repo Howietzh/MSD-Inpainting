@@ -51,7 +51,15 @@ def slider_hidden():
 
 def build_param_updates(engine, defect_token):
     if engine is None or not defect_token:
-        return slider_hidden(), slider_hidden(), slider_hidden(), slider_hidden(), slider_hidden()
+        return (
+            slider_hidden(),
+            slider_hidden(),
+            slider_hidden(),
+            slider_hidden(),
+            slider_hidden(),
+            slider_hidden(),
+            slider_hidden(),
+        )
 
     spec = engine.get_param_spec(defect_token)
     kind = spec["kind"]
@@ -61,6 +69,8 @@ def build_param_updates(engine, defect_token):
     width_update = slider_hidden()
     radius_update = slider_hidden()
     count_update = slider_hidden()
+    curvature_min_update = slider_hidden()
+    curvature_max_update = slider_hidden()
 
     if kind == "scratch":
         length_update = gr.update(
@@ -78,6 +88,22 @@ def build_param_updates(engine, defect_token):
             maximum=spec["thickness"]["maximum"],
             step=1,
             value=spec["thickness"]["value"],
+        )
+        curvature_min_update = gr.update(
+            visible=True,
+            label=spec["curvature_min"]["label"],
+            minimum=spec["curvature_min"]["minimum"],
+            maximum=spec["curvature_min"]["maximum"],
+            step=spec["curvature_min"]["step"],
+            value=spec["curvature_min"]["value"],
+        )
+        curvature_max_update = gr.update(
+            visible=True,
+            label=spec["curvature_max"]["label"],
+            minimum=spec["curvature_max"]["minimum"],
+            maximum=spec["curvature_max"]["maximum"],
+            step=spec["curvature_max"]["step"],
+            value=spec["curvature_max"]["value"],
         )
     elif kind == "tear":
         length_update = gr.update(
@@ -114,7 +140,15 @@ def build_param_updates(engine, defect_token):
             value=spec["count"]["value"],
         )
 
-    return length_update, thickness_update, width_update, radius_update, count_update
+    return (
+        length_update,
+        thickness_update,
+        width_update,
+        radius_update,
+        count_update,
+        curvature_min_update,
+        curvature_max_update,
+    )
 
 
 def preview_record(engine, component_token, selected_image_path, use_random_image, base_seed):
@@ -208,7 +242,13 @@ def load_engine(train_config, infer_config, lora_weights, normal_dir, stats_cach
         )
 
     param_updates = build_param_updates(engine, selected_defect) if selected_defect else (
-        slider_hidden(), slider_hidden(), slider_hidden(), slider_hidden(), slider_hidden()
+        slider_hidden(),
+        slider_hidden(),
+        slider_hidden(),
+        slider_hidden(),
+        slider_hidden(),
+        slider_hidden(),
+        slider_hidden(),
     )
     status = (
         f"已加载模型。device={engine.device.type}, "
@@ -243,6 +283,8 @@ def generate_mask(
     width,
     radius,
     count,
+    curvature_min,
+    curvature_max,
     random_use_cache_range,
 ):
     if engine is None:
@@ -260,6 +302,8 @@ def generate_mask(
         width=width,
         radius=radius,
         count=count,
+        curvature_min=curvature_min,
+        curvature_max=curvature_max,
         random_use_cache_range=random_use_cache_range,
     )
     return (
@@ -347,6 +391,8 @@ def create_demo(initial_values):
                 width_slider = gr.Slider(label="Width", minimum=1, maximum=30, step=1, value=5, visible=False)
                 radius_slider = gr.Slider(label="Radius", minimum=1, maximum=30, step=1, value=5, visible=False)
                 count_slider = gr.Slider(label="Count", minimum=1, maximum=10, step=1, value=1, visible=False)
+                curvature_min_slider = gr.Slider(label="Curvature Min", minimum=0.0, maximum=1.0, step=0.01, value=0.05, visible=False)
+                curvature_max_slider = gr.Slider(label="Curvature Max", minimum=0.0, maximum=1.0, step=0.01, value=0.65, visible=False)
                 generate_mask_button = gr.Button("生成 / 刷新 Mask")
                 generate_button = gr.Button("开始缺陷生成", variant="primary")
 
@@ -382,6 +428,8 @@ def create_demo(initial_values):
                 width_slider,
                 radius_slider,
                 count_slider,
+                curvature_min_slider,
+                curvature_max_slider,
             ],
         ).then(
             fn=clear_generation_state,
@@ -394,7 +442,19 @@ def create_demo(initial_values):
         component_token.change(
             fn=on_component_change,
             inputs=[engine_state, component_token, use_random_image, base_seed],
-            outputs=[defect_token, normal_image_path, original_image, component_mask, length_slider, thickness_slider, width_slider, radius_slider, count_slider],
+            outputs=[
+                defect_token,
+                normal_image_path,
+                original_image,
+                component_mask,
+                length_slider,
+                thickness_slider,
+                width_slider,
+                radius_slider,
+                count_slider,
+                curvature_min_slider,
+                curvature_max_slider,
+            ],
         ).then(
             fn=clear_generation_state,
             outputs=[mask_state, defect_mask, defect_overlay, candidate_gallery, best_image, triptych_image, info_json],
@@ -430,7 +490,15 @@ def create_demo(initial_values):
         defect_token.change(
             fn=build_param_updates,
             inputs=[engine_state, defect_token],
-            outputs=[length_slider, thickness_slider, width_slider, radius_slider, count_slider],
+            outputs=[
+                length_slider,
+                thickness_slider,
+                width_slider,
+                radius_slider,
+                count_slider,
+                curvature_min_slider,
+                curvature_max_slider,
+            ],
         ).then(
             fn=clear_generation_state,
             outputs=[mask_state, defect_mask, defect_overlay, candidate_gallery, best_image, triptych_image, info_json],
@@ -439,7 +507,18 @@ def create_demo(initial_values):
             outputs=[mask_refresh_state],
         )
 
-        for control in [use_random_image, random_use_cache_range, base_seed, length_slider, thickness_slider, width_slider, radius_slider, count_slider]:
+        for control in [
+            use_random_image,
+            random_use_cache_range,
+            base_seed,
+            length_slider,
+            thickness_slider,
+            width_slider,
+            radius_slider,
+            count_slider,
+            curvature_min_slider,
+            curvature_max_slider,
+        ]:
             control.change(
                 fn=clear_generation_state,
                 outputs=[mask_state, defect_mask, defect_overlay, candidate_gallery, best_image, triptych_image, info_json],
@@ -463,6 +542,8 @@ def create_demo(initial_values):
                 width_slider,
                 radius_slider,
                 count_slider,
+                curvature_min_slider,
+                curvature_max_slider,
                 random_use_cache_range,
             ],
             outputs=[

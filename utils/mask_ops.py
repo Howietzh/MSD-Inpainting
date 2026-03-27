@@ -45,11 +45,11 @@ class DefectMaskEngine:
                 "width": {"p10": 5, "p90": 15},
             }
 
-        return {
-            "kind": "scratch",
-            "length": {"p10": 50, "p90": 150},
-            "thickness": {"p10": 5, "p90": 15},
-        }
+            return {
+                "kind": "scratch",
+                "length": {"p10": 50, "p90": 150},
+                "thickness": {"p10": 5, "p90": 15},
+            }
 
     def _is_structured_stats(self, stats):
         return isinstance(stats, dict) and "kind" in stats
@@ -311,6 +311,8 @@ class DefectMaskEngine:
                 comp_mask_np,
                 length=int(params["length"]),
                 thickness=int(params["thickness"]),
+                curvature_min=float(params.get("curvature_min", 0.03)),
+                curvature_max=float(params.get("curvature_max", 0.65)),
             )
             details.update(scratch_details)
         elif kind == "particle":
@@ -333,10 +335,12 @@ class DefectMaskEngine:
                     fallback_radius = max(2, int(params.get("width", 2)))
                 cv2.circle(defect_mask, (xs[idx], ys[idx]), max(3, fallback_radius), 255, -1)
                 if kind == "scratch":
+                    fallback_length = float(max(3, fallback_radius) * 2)
                     details.update({
                         "requested_length": float(params.get("length", 0)),
-                        "actual_length": float(max(3, fallback_radius) * 2),
-                        "length_control_mode": "arc_length",
+                        "actual_length": fallback_length,
+                        "actual_arc_length": fallback_length,
+                        "length_control_mode": "endpoint_distance",
                         "degraded": True,
                         "fallback": True,
                     })
@@ -438,44 +442,31 @@ class DefectMaskEngine:
         if not direction_results:
             return None
 
-        chord_lower = max(4.0, float(target_length) * 0.45)
-        eligible = [item for item in direction_results if item["max_length"] >= chord_lower]
-        if not eligible:
-            eligible = direction_results
-
-        preferred = []
-        chord_target_low = float(target_length) * 0.75
-        chord_target_high = float(target_length) * 0.95
-        for item in eligible:
-            if item["max_length"] >= chord_target_low:
-                preferred.append(item)
-        candidates = preferred if preferred else eligible
+        target_length = float(target_length)
+        exact_candidates = [item for item in direction_results if item["max_length"] >= target_length]
+        degraded = len(exact_candidates) == 0
+        candidates = exact_candidates if exact_candidates else direction_results
         chosen = random.choice(candidates)
 
-        chord_target = min(
-            chosen["max_length"],
-            max(chord_lower, min(chosen["max_length"], float(target_length) * random.uniform(0.78, 0.93))),
-        )
+        chord_target = min(chosen["max_length"], target_length)
         p2 = p0 + chosen["direction"] * chord_target
-        return p2.astype(np.float32), chosen
+        return p2.astype(np.float32), chosen, degraded
 
-    def _refine_control_point_for_target_arc_length(
+    def _build_scratch_curve_with_random_curvature(
         self,
         p0,
         p2,
-        target_length,
         comp_mask,
         thickness,
         dist_map,
-        curvature_ratio_init,
-        curvature_sign,
-        max_length_error_ratio=0.1,
+        min_curvature_ratio=0.03,
+        max_curvature_ratio=0.65,
+        max_curve_attempts=14,
     ):
         chord = float(np.linalg.norm(p2 - p0))
         if chord <= 1e-6:
             return None
 
-        target_length = max(float(target_length), chord)
         midpoint = (p0 + p2) / 2.0
         tangent = p2 - p0
         perp = np.array([-tangent[1], tangent[0]], dtype=np.float32)
@@ -483,50 +474,38 @@ class DefectMaskEngine:
         if perp_norm <= 1e-6:
             return None
         perp /= perp_norm
-        perp *= float(curvature_sign)
+        curvature_candidates = [0.0]
+        curvature_candidates.extend(
+            random.uniform(float(min_curvature_ratio), float(max_curvature_ratio))
+            for _ in range(max_curve_attempts)
+        )
+        random.shuffle(curvature_candidates)
 
-        best_result = None
-        initial_offset = max(0.0, float(curvature_ratio_init) * chord)
-        max_offset = max(initial_offset * 2.0, max(target_length, chord) * 1.25)
-        low, high = 0.0, max_offset
+        inside_candidates = []
+        for curvature_ratio in curvature_candidates:
+            signs = [random.choice([-1, 1])] if curvature_ratio == 0.0 else random.sample([-1, 1], k=2)
+            for curvature_sign in signs:
+                offset = float(curvature_ratio) * chord
+                p1 = midpoint + perp * (float(curvature_sign) * offset)
+                arc_length, curve = self._compute_bezier_arc_length([p0, p1, p2])
+                if not self._is_curve_inside_component(curve, comp_mask, thickness, dist_map=dist_map):
+                    continue
+                inside_candidates.append(
+                    {
+                        "control_point": p1,
+                        "curve": curve,
+                        "arc_length": arc_length,
+                        "curvature_sign": int(curvature_sign),
+                        "curvature_ratio": float(curvature_ratio),
+                    }
+                )
 
-        for _ in range(18):
-            if initial_offset > 0 and _ == 0:
-                offset = min(initial_offset, max_offset)
-            else:
-                offset = (low + high) / 2.0
-            p1 = midpoint + perp * offset
-            arc_length, curve = self._compute_bezier_arc_length([p0, p1, p2])
-            inside = self._is_curve_inside_component(curve, comp_mask, thickness, dist_map=dist_map)
-            error = abs(arc_length - target_length)
-            candidate = {
-                "control_point": p1,
-                "curve": curve,
-                "arc_length": arc_length,
-                "inside": inside,
-                "error": error,
-                "curvature_sign": int(curvature_sign),
-                "curvature_ratio": float(offset / chord) if chord > 1e-6 else 0.0,
-            }
-
-            if best_result is None:
-                best_result = candidate
-            else:
-                if inside and not best_result["inside"]:
-                    best_result = candidate
-                elif inside == best_result["inside"] and error < best_result["error"]:
-                    best_result = candidate
-
-            if not inside or arc_length > target_length:
-                high = offset
-            else:
-                low = offset
-
-        if best_result is None or not best_result["inside"]:
+        if not inside_candidates:
             return None
 
-        best_result["degraded"] = best_result["error"] > (target_length * max_length_error_ratio)
-        return best_result
+        curved_candidates = [candidate for candidate in inside_candidates if candidate["curvature_ratio"] > 0.0]
+        pool = curved_candidates if curved_candidates else inside_candidates
+        return random.choice(pool)
 
     def _draw_variable_thickness_poly(self, points, max_thickness, roughness=0.3):
         defect = np.zeros(self.shape, dtype=np.uint8)
@@ -545,10 +524,21 @@ class DefectMaskEngine:
         cv2.fillPoly(defect, [np.concatenate([pts_l, pts_r[::-1]], axis=0).astype(np.int32)], color=255)
         return defect
 
-    def _generate_scratch(self, comp_mask, length=200, thickness=5, margin=10, curvature=50):
+    def _generate_scratch(
+        self,
+        comp_mask,
+        length=200,
+        thickness=5,
+        margin=10,
+        curvature=50,
+        curvature_min=0.03,
+        curvature_max=0.65,
+    ):
         dist_map = cv2.distanceTransform(comp_mask, cv2.DIST_L2, 5)
         target_length = max(5.0, float(length))
         thickness = max(1, int(thickness))
+        curvature_min = max(0.0, float(curvature_min))
+        curvature_max = max(curvature_min, float(curvature_max))
         best_candidate = None
         max_attempts = 32
 
@@ -569,19 +559,16 @@ class DefectMaskEngine:
             if endpoint_result is None:
                 continue
 
-            p2, direction_info = endpoint_result
-            curvature_sign = random.choice([-1, 1])
-            curvature_ratio_init = random.uniform(0.05, 0.35)
-            candidate = self._refine_control_point_for_target_arc_length(
+            p2, direction_info, degraded_length = endpoint_result
+            candidate = self._build_scratch_curve_with_random_curvature(
                 p0=p0,
                 p2=p2,
-                target_length=target_length,
                 comp_mask=comp_mask,
                 thickness=thickness,
                 dist_map=dist_map,
-                curvature_ratio_init=curvature_ratio_init,
-                curvature_sign=curvature_sign,
-                max_length_error_ratio=0.1,
+                min_curvature_ratio=curvature_min,
+                max_curvature_ratio=curvature_max,
+                max_curve_attempts=14,
             )
             if candidate is None:
                 continue
@@ -590,9 +577,15 @@ class DefectMaskEngine:
                 np.degrees(np.arctan2(direction_info["direction"][1], direction_info["direction"][0]))
             )
             candidate["chord_length"] = float(np.linalg.norm(p2 - p0))
+            candidate["degraded"] = bool(degraded_length)
 
-            if best_candidate is None or candidate["error"] < best_candidate["error"]:
+            if best_candidate is None:
                 best_candidate = candidate
+            elif best_candidate["degraded"] and not candidate["degraded"]:
+                best_candidate = candidate
+            elif best_candidate["degraded"] == candidate["degraded"] and candidate["curvature_ratio"] > best_candidate["curvature_ratio"]:
+                best_candidate = candidate
+
             if not candidate["degraded"]:
                 break
 
@@ -600,7 +593,8 @@ class DefectMaskEngine:
             return np.zeros(self.shape, dtype=np.uint8), {
                 "requested_length": target_length,
                 "actual_length": 0.0,
-                "length_control_mode": "arc_length",
+                "actual_arc_length": 0.0,
+                "length_control_mode": "endpoint_distance",
                 "degraded": True,
                 "fallback": True,
             }
@@ -613,14 +607,17 @@ class DefectMaskEngine:
         end_point = best_candidate["curve"][-1]
         details = {
             "requested_length": target_length,
-            "actual_length": float(best_candidate["arc_length"]),
-            "length_control_mode": "arc_length",
+            "actual_length": float(best_candidate["chord_length"]),
+            "actual_arc_length": float(best_candidate["arc_length"]),
+            "length_control_mode": "endpoint_distance",
             "degraded": bool(best_candidate["degraded"]),
             "fallback": False,
             "start_point": [float(start_point[0]), float(start_point[1])],
             "end_point": [float(end_point[0]), float(end_point[1])],
             "curvature_sign": int(best_candidate["curvature_sign"]),
             "curvature_ratio": float(best_candidate["curvature_ratio"]),
+            "requested_curvature_min": float(curvature_min),
+            "requested_curvature_max": float(curvature_max),
             "direction_angle_deg": float(best_candidate["direction_angle_deg"]),
             "chord_length": float(best_candidate["chord_length"]),
         }

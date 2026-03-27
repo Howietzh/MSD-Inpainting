@@ -163,6 +163,20 @@ class InteractiveDefectFillEngine:
                     "minimum": 1,
                     "maximum": max(defaults["thickness"] * 2, int(stats["thickness"]["p90"]) * 3),
                 },
+                "curvature_min": {
+                    "label": "Curvature Min",
+                    "value": 0.05,
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                    "step": 0.01,
+                },
+                "curvature_max": {
+                    "label": "Curvature Max",
+                    "value": 0.65,
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                    "step": 0.01,
+                },
             }
         if kind == "tear":
             return {
@@ -274,13 +288,24 @@ class InteractiveDefectFillEngine:
         width,
         radius,
         count,
+        curvature_min,
+        curvature_max,
     ):
         if random_use_cache_range:
-            return self.mask_engine.sample_generation_params(defect_token)
+            params = self.mask_engine.sample_generation_params(defect_token)
+            if self.mask_engine.get_defect_kind(defect_token) == "scratch":
+                params["curvature_min"] = float(curvature_min)
+                params["curvature_max"] = float(curvature_max)
+            return params
 
         kind = self.mask_engine.get_defect_kind(defect_token)
         if kind == "scratch":
-            return {"length": int(length), "thickness": int(thickness)}
+            return {
+                "length": int(length),
+                "thickness": int(thickness),
+                "curvature_min": float(curvature_min),
+                "curvature_max": float(curvature_max),
+            }
         if kind == "tear":
             return {"length": int(length), "width": int(width)}
         return {"radius": int(radius), "count": int(count)}
@@ -298,6 +323,8 @@ class InteractiveDefectFillEngine:
         width,
         radius,
         count,
+        curvature_min,
+        curvature_max,
         random_use_cache_range,
     ):
         record = self._select_record(component_token, selected_image_path, use_random_image, base_seed)
@@ -316,6 +343,8 @@ class InteractiveDefectFillEngine:
             width,
             radius,
             count,
+            curvature_min,
+            curvature_max,
         )
         defect_mask_np, mask_details = self.mask_engine.generate_dynamic_mask_with_params(
             comp_mask_np,
