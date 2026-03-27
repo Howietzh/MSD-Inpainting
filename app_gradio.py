@@ -186,8 +186,8 @@ def load_engine(train_config, infer_config, lora_weights, normal_dir, stats_cach
         raise gr.Error(str(exc)) from exc
 
     component_choices = engine.get_component_choices()
-    defect_choices = engine.get_defect_choices(selected_component)
     selected_component = component_choices[0] if component_choices else None
+    defect_choices = engine.get_defect_choices(selected_component)
     selected_defect = defect_choices[0] if defect_choices else None
 
     image_choices = engine.get_normal_image_choices(selected_component) if selected_component else []
