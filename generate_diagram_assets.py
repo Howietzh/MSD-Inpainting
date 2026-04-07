@@ -88,30 +88,14 @@ def get_pipeline_from_engine(engine):
     return engine
 
 
-def _normalize_attention_map(attention_map: torch.Tensor) -> torch.Tensor:
-    attention_map = attention_map.detach().float()
-    attn_min = attention_map.amin(dim=(-2, -1), keepdim=True)
-    attn_max = attention_map.amax(dim=(-2, -1), keepdim=True)
-    return (attention_map - attn_min) / (attn_max - attn_min + 1e-6)
-
-
 def aggregate_attention_for_visualization(attention_maps, target_size: int = 512):
     if not attention_maps:
         raise ValueError("No attention maps were collected for visualization.")
 
-    max_area = max(attn.shape[-2] * attn.shape[-1] for attn in attention_maps)
-    highest_res_maps = [
-        attn for attn in attention_maps
-        if attn.shape[-2] * attn.shape[-1] == max_area
-    ]
-    if not highest_res_maps:
-        raise ValueError("Failed to find highest-resolution attention maps for visualization.")
-
     aggregated_map = None
-    for target_attn in highest_res_maps:
-        normalized_attn = _normalize_attention_map(target_attn)
+    for target_attn in attention_maps:
         resized_attn = F.interpolate(
-            normalized_attn,
+            target_attn.detach().float(),
             size=(target_size, target_size),
             mode="bilinear",
             align_corners=False,
@@ -121,7 +105,7 @@ def aggregate_attention_for_visualization(attention_maps, target_size: int = 512
         else:
             aggregated_map += resized_attn
 
-    return aggregated_map / len(highest_res_maps)
+    return aggregated_map / len(attention_maps)
 
 # =========================================================================
 # 模块一：生成拓扑图与【极其严谨的手动前向传播 Attention】
