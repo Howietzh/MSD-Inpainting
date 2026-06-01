@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt
 
 TARGET_SIZE = 512
 COMPACT_EPOCHS = (0, 10, 30, 60)
+ATTENTION_OVERLAY_ALPHA = 0.45
 
 
 def parse_args():
@@ -177,6 +178,19 @@ def build_overlay_image(image_np: np.ndarray, defect_mask_np: np.ndarray) -> np.
         0.6 * overlay[mask_bool] + 0.4 * np.array([255, 80, 80], dtype=np.float32)
     ).astype(np.uint8)
     return overlay
+
+
+def build_attention_overlay(
+    image_np: np.ndarray,
+    attention_map: np.ndarray,
+    vmin: float,
+    vmax: float,
+    alpha: float = ATTENTION_OVERLAY_ALPHA,
+) -> np.ndarray:
+    normalized = np.clip((attention_map.astype(np.float32) - vmin) / (vmax - vmin + 1e-8), 0.0, 1.0)
+    heatmap = plt.get_cmap("jet")(normalized)[:, :, :3] * 255.0
+    blended = (1.0 - alpha) * image_np.astype(np.float32) + alpha * heatmap
+    return np.clip(np.round(blended), 0, 255).astype(np.uint8)
 
 
 def serialize_path(path: Path) -> str:
@@ -471,11 +485,15 @@ def save_compact_figure(
 
             if col_idx == 0:
                 ax.imshow(overlay_np)
-                draw_mask_contour(ax, representative_sample["defect_mask_np"], color="white")
             else:
                 attention_item = method_to_maps[method_name][col_idx - 1]
-                ax.imshow(attention_item["attention_map"], cmap="jet", vmin=vmin, vmax=vmax)
-                draw_mask_contour(ax, representative_sample["defect_mask_np"], color="white")
+                attention_overlay = build_attention_overlay(
+                    representative_sample["image_np"],
+                    attention_item["attention_map"],
+                    vmin,
+                    vmax,
+                )
+                ax.imshow(attention_overlay)
 
         axes[row_idx, 0].set_ylabel(method_name, fontsize=8, rotation=90, labelpad=10)
 
@@ -524,6 +542,12 @@ def build_manifest(
         "guidance_scale": float(guidance_scale),
         "negative_prompt": negative_prompt,
         "shared_color_range": {"vmin": vmin, "vmax": vmax},
+        "figure_rendering": {
+            "reference_render_mode": "image_mask_overlay",
+            "attention_render_mode": "image_attention_overlay",
+            "attention_overlay_alpha": ATTENTION_OVERLAY_ALPHA,
+            "mask_contour_on_attention": False,
+        },
         "compact_checkpoints": [
             {
                 "label": slot["label"],
