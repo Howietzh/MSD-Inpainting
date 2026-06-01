@@ -7,6 +7,16 @@ class StoreCrossAttnProcessor:
     def __init__(self):
         self.attention_maps = {}
         self.target_token_indices = None
+        self.capture_mode = "direct"
+
+    def _resolve_batch_index(self, batch_idx: int, token_count: int, batch_size: int) -> int:
+        if (
+            self.capture_mode == "cfg_conditional"
+            and token_count > 0
+            and batch_size == token_count * 2
+        ):
+            return batch_idx + token_count
+        return batch_idx
 
     def __call__(
         self,
@@ -61,8 +71,15 @@ class StoreCrossAttnProcessor:
             attn_map = attention_probs.view(batch_size, attn.heads, hw, -1)
             for target_name, token_indices in self.target_token_indices.items():
                 sample_maps = []
+                token_count = len(token_indices)
                 for batch_idx, token_index in enumerate(token_indices):
-                    if token_index < 0 or token_index >= attn_map.shape[-1]:
+                    attn_batch_idx = self._resolve_batch_index(batch_idx, token_count, batch_size)
+                    if (
+                        attn_batch_idx < 0
+                        or attn_batch_idx >= attn_map.shape[0]
+                        or token_index < 0
+                        or token_index >= attn_map.shape[-1]
+                    ):
                         sample_attn = torch.zeros(
                             1,
                             h,
@@ -71,7 +88,7 @@ class StoreCrossAttnProcessor:
                             dtype=attn_map.dtype,
                         )
                     else:
-                        sample_attn = attn_map[batch_idx, :, :, token_index].view(attn.heads, h, w).mean(dim=0, keepdim=True)
+                        sample_attn = attn_map[attn_batch_idx, :, :, token_index].view(attn.heads, h, w).mean(dim=0, keepdim=True)
                     sample_maps.append(sample_attn)
                 self.attention_maps.setdefault(target_name, []).append(torch.stack(sample_maps, dim=0))
 
@@ -103,13 +120,15 @@ class AttentionStore:
                 attn_processors[name] = unet.attn_processors[name]
         unet.set_attn_processor(attn_processors)
 
-    def set_target_token_indices(self, token_indices):
+    def set_target_token_indices(self, token_indices, capture_mode: str = "direct"):
         self.processor.target_token_indices = {"default": token_indices}
+        self.processor.capture_mode = capture_mode
 
-    def set_named_target_token_indices(self, token_indices_by_name):
+    def set_named_target_token_indices(self, token_indices_by_name, capture_mode: str = "direct"):
         self.processor.target_token_indices = {
             name: indices for name, indices in token_indices_by_name.items() if indices
         }
+        self.processor.capture_mode = capture_mode
 
     def _aggregate_single_target(self, attention_maps, target_size: int = 64):
         if not attention_maps:
@@ -138,3 +157,4 @@ class AttentionStore:
     def clear(self):
         self.processor.attention_maps = {}
         self.processor.target_token_indices = None
+        self.processor.capture_mode = "direct"
