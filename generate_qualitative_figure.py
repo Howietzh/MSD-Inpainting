@@ -41,6 +41,7 @@ def parse_args():
     parser.add_argument("--negative-prompt", type=str, default=None)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--max-tasks", type=int, default=None)
+    parser.add_argument("--samples-per-task", type=int, default=10)
     return parser.parse_args()
 
 
@@ -292,6 +293,9 @@ def main():
         else infer_options.get("negative_prompt", "")
     )
     base_seed = int(args.base_seed)
+    samples_per_task = int(args.samples_per_task)
+    if samples_per_task <= 0:
+        raise ValueError("samples_per_task must be a positive integer.")
 
     requested_device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     if requested_device == "cuda" and not torch.cuda.is_available():
@@ -339,6 +343,7 @@ def main():
         "guidance_scale": guidance_scale,
         "negative_prompt": negative_prompt,
         "mask_inset_ratio": MASK_INSET_RATIO,
+        "samples_per_task": samples_per_task,
         "experiments": [
             {
                 "experiment": item["experiment"],
@@ -354,73 +359,86 @@ def main():
     for task_idx, task in enumerate(tasks):
         defect_token = task["defect"]
         component_token = task["comp"]
-        sample_seed = base_seed + task_idx
-        mask_seed = base_seed + task_idx * 1000
-        generation_seed = base_seed + task_idx * 10000
         prompt = f"a photo of {component_token} with {defect_token}"
         print(f"[Task {task_idx}] {defect_token} on {component_token}")
 
-        sample = select_normal_sample(normal_dir, component_token, sample_seed)
-        defect_mask_np, mask_params, mask_details = build_shared_mask(
-            mask_engine,
-            sample["component_mask_np"],
-            defect_token,
-            mask_seed,
-        )
+        task_manifest = {
+            "task_index": task_idx,
+            "defect_token": defect_token,
+            "component_token": component_token,
+            "prompt": prompt,
+            "samples": [],
+        }
 
-        task_outputs = []
-        for experiment in resolved_experiments:
-            print(f"  generating with {experiment['label']} from {experiment['weight_source']}")
-            pipe = build_pipe(model_source, weight_dtype, device, experiment["lora_dir"])
-            try:
-                generated = run_generation(
-                    pipe=pipe,
-                    prompt=prompt,
-                    image_np=sample["image_np"],
-                    defect_mask_np=defect_mask_np,
-                    seed=generation_seed,
-                    num_inference_steps=num_inference_steps,
-                    guidance_scale=guidance_scale,
-                    negative_prompt=negative_prompt,
+        for sample_idx in range(samples_per_task):
+            sample_seed = base_seed + task_idx * 1000 + sample_idx
+            mask_seed = base_seed + task_idx * 100000 + sample_idx * 100
+            generation_seed = base_seed + task_idx * 1000000 + sample_idx * 1000
+            print(f"  [Sample {sample_idx:02d}] mask_seed={mask_seed} generation_seed={generation_seed}")
+
+            sample = select_normal_sample(normal_dir, component_token, sample_seed)
+            defect_mask_np, mask_params, mask_details = build_shared_mask(
+                mask_engine,
+                sample["component_mask_np"],
+                defect_token,
+                mask_seed,
+            )
+
+            sample_outputs = []
+            for experiment in resolved_experiments:
+                print(f"    generating with {experiment['label']} from {experiment['weight_source']}")
+                pipe = build_pipe(model_source, weight_dtype, device, experiment["lora_dir"])
+                try:
+                    generated = run_generation(
+                        pipe=pipe,
+                        prompt=prompt,
+                        image_np=sample["image_np"],
+                        defect_mask_np=defect_mask_np,
+                        seed=generation_seed,
+                        num_inference_steps=num_inference_steps,
+                        guidance_scale=guidance_scale,
+                        negative_prompt=negative_prompt,
+                    )
+                finally:
+                    del pipe
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+                final_image = add_mask_inset(generated, defect_mask_np)
+                base_name = (
+                    f"{task_idx:02d}_{safe_token(defect_token)}_{safe_token(component_token)}"
+                    f"_sample{sample_idx:02d}_{experiment['label']}"
                 )
-            finally:
-                del pipe
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                output_path = output_dir / f"{base_name}.png"
+                final_image.save(output_path)
+                sample_outputs.append(
+                    {
+                        "experiment": experiment["experiment"],
+                        "label": experiment["label"],
+                        "weight_source": experiment["weight_source"],
+                        "lora_dir": serialize_path(experiment["lora_dir"]),
+                        "output_path": serialize_path(output_path),
+                    }
+                )
 
-            final_image = add_mask_inset(generated, defect_mask_np)
-            base_name = f"{task_idx:02d}_{safe_token(defect_token)}_{safe_token(component_token)}_{experiment['label']}"
-            output_path = output_dir / f"{base_name}.png"
-            final_image.save(output_path)
-            task_outputs.append(
+            task_manifest["samples"].append(
                 {
-                    "experiment": experiment["experiment"],
-                    "label": experiment["label"],
-                    "weight_source": experiment["weight_source"],
-                    "lora_dir": serialize_path(experiment["lora_dir"]),
-                    "output_path": serialize_path(output_path),
+                    "sample_index": sample_idx,
+                    "sample_seed": sample_seed,
+                    "mask_seed": mask_seed,
+                    "generation_seed": generation_seed,
+                    "normal_dataset_index": sample["dataset_index"],
+                    "normal_image_path": sample["image_path"],
+                    "component_mask_path": sample["component_mask_path"],
+                    "mask_area": int(cv2.countNonZero(defect_mask_np)),
+                    "mask_params": mask_params,
+                    "mask_details": mask_details,
+                    "outputs": sample_outputs,
                 }
             )
 
-        manifest["tasks"].append(
-            {
-                "task_index": task_idx,
-                "defect_token": defect_token,
-                "component_token": component_token,
-                "prompt": prompt,
-                "sample_seed": sample_seed,
-                "mask_seed": mask_seed,
-                "generation_seed": generation_seed,
-                "normal_dataset_index": sample["dataset_index"],
-                "normal_image_path": sample["image_path"],
-                "component_mask_path": sample["component_mask_path"],
-                "mask_area": int(cv2.countNonZero(defect_mask_np)),
-                "mask_params": mask_params,
-                "mask_details": mask_details,
-                "outputs": task_outputs,
-            }
-        )
+        manifest["tasks"].append(task_manifest)
 
     manifest_path = output_dir / "manifest.json"
     with open(manifest_path, "w", encoding="utf-8") as f:
