@@ -207,8 +207,7 @@ class DefectSegmentationDataset(Dataset):
                 f"Image and mask dimensions differ for {record['image_path']}: "
                 f"image={image.shape[:2]}, mask={source_mask.shape}"
             )
-        if not np.any(source_mask > 0):
-            raise ValueError(f"Defect mask is empty for {record['defect_mask_path']}")
+        # Empty generated masks stay all-background so generation failures affect downstream quality.
         semantic_mask = np.zeros_like(source_mask, dtype=np.uint8)
         semantic_mask[source_mask > 0] = COMPONENT_DEFECT_CLASS_MAP[task_key(record)]
         image_tensor, mask_tensor = self.transform(image, semantic_mask)
