@@ -2,15 +2,19 @@ import argparse
 import csv
 import json
 import math
+import os
 import random
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 import yaml
+from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 
 from dataset.segmentation_dataset import (
@@ -39,6 +43,48 @@ def seed_everything(seed: int):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+class DistributedContext:
+    def __init__(self, requested_device: str):
+        self.distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
+        self.rank = int(os.environ.get("RANK", 0))
+        self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        self.world_size = int(os.environ.get("WORLD_SIZE", 1))
+
+        if self.distributed:
+            if not torch.cuda.is_available():
+                raise RuntimeError("Distributed MobileViT-UNet training requires CUDA.")
+            torch.cuda.set_device(self.local_rank)
+            dist.init_process_group(backend="nccl")
+            self.device = torch.device("cuda", self.local_rank)
+        else:
+            if requested_device == "cuda" and not torch.cuda.is_available():
+                requested_device = "cpu"
+            self.device = torch.device(requested_device)
+
+    @property
+    def is_main(self):
+        return self.rank == 0
+
+    def barrier(self):
+        if self.distributed:
+            dist.barrier()
+
+    def reduce_totals(self, totals: np.ndarray) -> np.ndarray:
+        if not self.distributed:
+            return totals
+        tensor = torch.as_tensor(totals, dtype=torch.float64, device=self.device)
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        return tensor.cpu().numpy()
+
+    def close(self):
+        if self.distributed:
+            dist.destroy_process_group()
+
+
+def unwrap_model(model):
+    return model.module if isinstance(model, DistributedDataParallel) else model
 
 
 def worker_init_fn(worker_id: int):
@@ -120,7 +166,7 @@ def compute_loss(logits, labels, ce_weight: float, dice_weight: float):
     return total_loss, ce_loss, dice_loss
 
 
-def create_loaders(train_records, validation_records, test_records, config, seed):
+def create_loaders(train_records, validation_records, test_records, config, seed, distributed_context):
     training = config["training"]
     augmentation = config["augmentation"]
     size = int(training["image_size"])
@@ -134,7 +180,19 @@ def create_loaders(train_records, validation_records, test_records, config, seed
         clahe_grid_size=int(augmentation["clahe_grid_size"]),
     )
     eval_transform = SegmentationTransform(size=size, training=False)
-    generator = torch.Generator().manual_seed(seed)
+    train_dataset = DefectSegmentationDataset(train_records, train_transform)
+    train_sampler = (
+        DistributedSampler(
+            train_dataset,
+            num_replicas=distributed_context.world_size,
+            rank=distributed_context.rank,
+            shuffle=True,
+            seed=seed,
+        )
+        if distributed_context.distributed
+        else None
+    )
+    generator = torch.Generator().manual_seed(seed + distributed_context.rank)
     common = {
         "batch_size": int(training["batch_size"]),
         "num_workers": int(training["num_workers"]),
@@ -142,8 +200,9 @@ def create_loaders(train_records, validation_records, test_records, config, seed
         "worker_init_fn": worker_init_fn,
     }
     train_loader = DataLoader(
-        DefectSegmentationDataset(train_records, train_transform),
-        shuffle=True,
+        train_dataset,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         generator=generator,
         **common,
     )
@@ -157,10 +216,10 @@ def create_loaders(train_records, validation_records, test_records, config, seed
         shuffle=False,
         **common,
     )
-    return train_loader, validation_loader, test_loader
+    return train_loader, validation_loader, test_loader, train_sampler
 
 
-def train_epoch(model, loader, optimizer, scaler, device, ce_weight, dice_weight, use_amp):
+def train_epoch(model, loader, optimizer, scaler, device, ce_weight, dice_weight, use_amp, distributed_context):
     model.train()
     totals = np.zeros(4, dtype=np.float64)
     for batch in loader:
@@ -174,7 +233,13 @@ def train_epoch(model, loader, optimizer, scaler, device, ce_weight, dice_weight
         scaler.step(optimizer)
         scaler.update()
         batch_size = images.shape[0]
-        totals += [float(loss) * batch_size, float(ce_loss) * batch_size, float(dice_loss) * batch_size, batch_size]
+        totals += [
+            loss.detach().item() * batch_size,
+            ce_loss.detach().item() * batch_size,
+            dice_loss.detach().item() * batch_size,
+            batch_size,
+        ]
+    totals = distributed_context.reduce_totals(totals)
     return {"loss": totals[0] / totals[3], "ce_loss": totals[1] / totals[3], "dice_loss": totals[2] / totals[3]}
 
 
@@ -190,7 +255,12 @@ def evaluate(model, loader, device, ce_weight, dice_weight, use_amp):
             logits = model(images)
             loss, ce_loss, dice_loss = compute_loss(logits, labels, ce_weight, dice_weight)
         batch_size = images.shape[0]
-        totals += [float(loss) * batch_size, float(ce_loss) * batch_size, float(dice_loss) * batch_size, batch_size]
+        totals += [
+            loss.detach().item() * batch_size,
+            ce_loss.detach().item() * batch_size,
+            dice_loss.detach().item() * batch_size,
+            batch_size,
+        ]
         confusion.update(logits.argmax(dim=1), labels, list(batch["task_key"]))
 
     metrics = metrics_from_matrix(confusion.matrix)
@@ -203,7 +273,7 @@ def save_checkpoint(path: Path, model, epoch: int, score: float, config: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
-            "model": model.state_dict(),
+            "model": unwrap_model(model).state_dict(),
             "epoch": epoch,
             "validation_mIoU_foreground": score,
             "config": config,
@@ -212,23 +282,28 @@ def save_checkpoint(path: Path, model, epoch: int, score: float, config: dict):
     )
 
 
-def train_run(experiment, seed, splits, test_records, config, output_dir, device):
-    seed_everything(seed)
+def train_run(experiment, seed, splits, test_records, config, output_dir, distributed_context):
+    seed_everything(seed + distributed_context.rank)
+    device = distributed_context.device
     training = config["training"]
     run_dir = output_dir / experiment / f"seed_{seed}"
     checkpoint_path = output_dir / "checkpoints" / experiment / f"seed_{seed}" / "best.pt"
     tensorboard_dir = output_dir / "tensorboard" / experiment / f"seed_{seed}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    writer = SummaryWriter(log_dir=str(tensorboard_dir))
+    if distributed_context.is_main:
+        run_dir.mkdir(parents=True, exist_ok=True)
+    distributed_context.barrier()
+    writer = SummaryWriter(log_dir=str(tensorboard_dir)) if distributed_context.is_main else None
 
-    train_loader, validation_loader, test_loader = create_loaders(
-        splits["train"], splits["validation"], test_records, config, seed
+    train_loader, validation_loader, test_loader, train_sampler = create_loaders(
+        splits["train"], splits["validation"], test_records, config, seed, distributed_context
     )
     model = MobileViTUNet(
         num_classes=NUM_CLASSES,
         pretrained_model_name=config["pretrained_model_name"],
         local_files_only=bool(config.get("local_files_only", False)),
     ).to(device)
+    if distributed_context.distributed:
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
     optimizer = torch.optim.AdamW(
         model.parameter_groups(
             float(training["encoder_learning_rate"]),
@@ -236,6 +311,8 @@ def train_run(experiment, seed, splits, test_records, config, output_dir, device
         ),
         weight_decay=float(training["weight_decay"]),
     )
+    if distributed_context.distributed:
+        model = DistributedDataParallel(model, device_ids=[distributed_context.local_rank])
     epochs = int(training["epochs"])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     use_amp = bool(training.get("mixed_precision", True)) and device.type == "cuda"
@@ -245,8 +322,9 @@ def train_run(experiment, seed, splits, test_records, config, output_dir, device
     validation_every = int(training["validation_every"])
     if validation_every <= 0:
         raise ValueError("training.validation_every must be positive.")
-    if checkpoint_path.exists():
+    if distributed_context.is_main and checkpoint_path.exists():
         checkpoint_path.unlink()
+    distributed_context.barrier()
     best_score = -math.inf
     best_epoch = None
     best_validation = None
@@ -254,55 +332,81 @@ def train_run(experiment, seed, splits, test_records, config, output_dir, device
 
     try:
         for epoch in range(1, epochs + 1):
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch)
             train_metrics = train_epoch(
-                model, train_loader, optimizer, scaler, device, ce_weight, dice_weight, use_amp
+                model,
+                train_loader,
+                optimizer,
+                scaler,
+                device,
+                ce_weight,
+                dice_weight,
+                use_amp,
+                distributed_context,
             )
             scheduler.step()
-            for name, value in train_metrics.items():
-                writer.add_scalar(f"train/{name}", value, epoch)
-            writer.add_scalar("learning_rate/encoder", optimizer.param_groups[0]["lr"], epoch)
-            writer.add_scalar("learning_rate/decoder", optimizer.param_groups[1]["lr"], epoch)
+            if distributed_context.is_main:
+                for name, value in train_metrics.items():
+                    writer.add_scalar(f"train/{name}", value, epoch)
+                writer.add_scalar("learning_rate/encoder", optimizer.param_groups[0]["lr"], epoch)
+                writer.add_scalar("learning_rate/decoder", optimizer.param_groups[1]["lr"], epoch)
 
             entry = {"epoch": epoch, "train": train_metrics}
             should_validate = epoch % validation_every == 0 or epoch == epochs
             if should_validate:
-                validation = evaluate(model, validation_loader, device, ce_weight, dice_weight, use_amp)
-                entry["validation"] = validation
-                for name in ("loss", "ce_loss", "dice_loss", "mIoU", "mIoU_foreground", "Precision", "Recall"):
-                    writer.add_scalar(f"validation/{name}", validation[name], epoch)
-                score = validation["mIoU_foreground"]
-                if score > best_score:
-                    best_score = score
-                    best_epoch = epoch
-                    best_validation = validation
-                    save_checkpoint(checkpoint_path, model, epoch, score, config)
-                print(
-                    f"[{experiment} seed={seed} epoch={epoch}] "
-                    f"train_loss={train_metrics['loss']:.4f} val_fg_mIoU={score:.4f}"
-                )
-            history.append(entry)
+                distributed_context.barrier()
+                if distributed_context.is_main:
+                    validation = evaluate(
+                        unwrap_model(model), validation_loader, device, ce_weight, dice_weight, use_amp
+                    )
+                    entry["validation"] = validation
+                    for name in ("loss", "ce_loss", "dice_loss", "mIoU", "mIoU_foreground", "Precision", "Recall"):
+                        writer.add_scalar(f"validation/{name}", validation[name], epoch)
+                    score = validation["mIoU_foreground"]
+                    if score > best_score:
+                        best_score = score
+                        best_epoch = epoch
+                        best_validation = validation
+                        save_checkpoint(checkpoint_path, model, epoch, score, config)
+                    print(
+                        f"[{experiment} seed={seed} epoch={epoch}] "
+                        f"train_loss={train_metrics['loss']:.4f} val_fg_mIoU={score:.4f}"
+                    )
+                distributed_context.barrier()
+            if distributed_context.is_main:
+                history.append(entry)
     finally:
-        writer.close()
+        if writer is not None:
+            writer.close()
 
+    distributed_context.barrier()
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    model.load_state_dict(checkpoint["model"])
-    test_metrics = evaluate(model, test_loader, device, ce_weight, dice_weight, use_amp)
-    result = {
-        "experiment": experiment,
-        "seed": seed,
-        "best_epoch": best_epoch,
-        "best_validation": best_validation,
-        "test": test_metrics,
-        "num_train": len(splits["train"]),
-        "num_validation": len(splits["validation"]),
-        "num_test": len(test_records),
-        "checkpoint": str(checkpoint_path.resolve()),
-        "tensorboard": str(tensorboard_dir.resolve()),
-    }
-    with open(run_dir / "result.json", "w", encoding="utf-8") as file:
-        json.dump(to_jsonable(result), file, indent=2, ensure_ascii=False)
-    with open(run_dir / "history.json", "w", encoding="utf-8") as file:
-        json.dump(to_jsonable(history), file, indent=2, ensure_ascii=False)
+    unwrap_model(model).load_state_dict(checkpoint["model"])
+    distributed_context.barrier()
+    result = None
+    if distributed_context.is_main:
+        test_metrics = evaluate(unwrap_model(model), test_loader, device, ce_weight, dice_weight, use_amp)
+        result = {
+            "experiment": experiment,
+            "seed": seed,
+            "best_epoch": best_epoch,
+            "best_validation": best_validation,
+            "test": test_metrics,
+            "num_train": len(splits["train"]),
+            "num_validation": len(splits["validation"]),
+            "num_test": len(test_records),
+            "world_size": distributed_context.world_size,
+            "per_gpu_batch_size": int(training["batch_size"]),
+            "effective_batch_size": int(training["batch_size"]) * distributed_context.world_size,
+            "checkpoint": str(checkpoint_path.resolve()),
+            "tensorboard": str(tensorboard_dir.resolve()),
+        }
+        with open(run_dir / "result.json", "w", encoding="utf-8") as file:
+            json.dump(to_jsonable(result), file, indent=2, ensure_ascii=False)
+        with open(run_dir / "history.json", "w", encoding="utf-8") as file:
+            json.dump(to_jsonable(history), file, indent=2, ensure_ascii=False)
+    distributed_context.barrier()
     return result
 
 
@@ -400,8 +504,11 @@ def main():
         config = yaml.safe_load(file)
     apply_config_overrides(config, args.overrides)
 
+    distributed_context = DistributedContext(str(config.get("device", "cuda")))
     output_dir = Path(config["paths"]["output_dir"])
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if distributed_context.is_main:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    distributed_context.barrier()
     experiments = list(config["experiments"])
     generated_root = Path(config["paths"]["generated_root"])
     experiment_records = {
@@ -417,20 +524,27 @@ def main():
         seed=int(config["training"]["seeds"][0]),
     )
     test_records = read_metadata(Path(config["paths"]["real_test_dir"]), generated=False)
-    requested_device = str(config.get("device", "cuda"))
-    if requested_device == "cuda" and not torch.cuda.is_available():
-        requested_device = "cpu"
-    device = torch.device(requested_device)
-
     results = []
-    for experiment in experiments:
-        for seed in config["training"]["seeds"]:
-            results.append(
-                train_run(experiment, int(seed), splits[experiment], test_records, config, output_dir, device)
-            )
-    summary = summarize(results, experiments)
-    write_summary(output_dir, summary, results, common_counts, config)
-    print(json.dumps(to_jsonable(summary), indent=2, ensure_ascii=False))
+    try:
+        for experiment in experiments:
+            for seed in config["training"]["seeds"]:
+                result = train_run(
+                    experiment,
+                    int(seed),
+                    splits[experiment],
+                    test_records,
+                    config,
+                    output_dir,
+                    distributed_context,
+                )
+                if distributed_context.is_main:
+                    results.append(result)
+        if distributed_context.is_main:
+            summary = summarize(results, experiments)
+            write_summary(output_dir, summary, results, common_counts, config)
+            print(json.dumps(to_jsonable(summary), indent=2, ensure_ascii=False))
+    finally:
+        distributed_context.close()
 
 
 if __name__ == "__main__":
