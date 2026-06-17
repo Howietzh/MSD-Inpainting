@@ -1,6 +1,6 @@
 device: "cuda"
-pretrained_model_name: "apple/mobilevit-x-small"
-local_files_only: false
+pretrained_model_name: "/home/doctor/tzh/MSD-Inpainting/pretrained/mobilevit-x-small"
+local_files_only: true
 
 paths:
   generated_root: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/generated_defect_dataset"
