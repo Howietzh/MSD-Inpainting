@@ -56,8 +56,8 @@ class DistributedContext:
             if not torch.cuda.is_available():
                 raise RuntimeError("Distributed MobileViT-UNet training requires CUDA.")
             torch.cuda.set_device(self.local_rank)
-            dist.init_process_group(backend="nccl")
             self.device = torch.device("cuda", self.local_rank)
+            dist.init_process_group(backend="nccl", device_id=self.device)
         else:
             if requested_device == "cuda" and not torch.cuda.is_available():
                 requested_device = "cpu"
@@ -69,7 +69,7 @@ class DistributedContext:
 
     def barrier(self):
         if self.distributed:
-            dist.barrier()
+            dist.barrier(device_ids=[self.local_rank])
 
     def reduce_totals(self, totals: np.ndarray) -> np.ndarray:
         if not self.distributed:
