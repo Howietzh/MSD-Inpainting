@@ -10,6 +10,8 @@ paths:
 experiments:
   - "defectfill_origin"
   - "increase_text_encoder_learning_rates"
+  - "seas"
+  - "dfmgan_ccms"
 
 training:
   seeds: [42, 43, 44]
