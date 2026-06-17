@@ -16,7 +16,7 @@ experiments:
 training:
   seeds: [42, 43, 44]
   image_size: 512
-  epochs: 100
+  epochs: 500
   batch_size: 8                       # Per-GPU batch size
   num_workers: 4
   validation_ratio: 0.2
