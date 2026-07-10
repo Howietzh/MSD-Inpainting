@@ -22,8 +22,8 @@ from dataset.segmentation_dataset import (
     NUM_CLASSES,
     DefectSegmentationDataset,
     SegmentationTransform,
-    build_balanced_splits,
     read_metadata,
+    task_key,
 )
 from models.mobilevit_unet import MobileViTUNet
 from utils.config_overrides import apply_config_overrides
@@ -219,6 +219,63 @@ def create_loaders(train_records, validation_records, test_records, config, seed
     return train_loader, validation_loader, test_loader, train_sampler
 
 
+def build_balanced_train_records(
+    experiment_records: dict[str, list[dict]],
+    seed: int,
+) -> tuple[dict[str, dict[str, list[dict]]], dict[str, int]]:
+    grouped = {}
+    all_tasks = set()
+    for experiment, records in experiment_records.items():
+        by_task = defaultdict(list)
+        for record in records:
+            by_task[task_key(record)].append(record)
+        grouped[experiment] = by_task
+        all_tasks.update(by_task)
+
+    result = {experiment: {"train": []} for experiment in experiment_records}
+    common_counts = {}
+    for key in sorted(all_tasks):
+        counts = [len(grouped[experiment].get(key, [])) for experiment in experiment_records]
+        common_count = min(counts)
+        if common_count < 1:
+            raise ValueError(f"Task {key} needs at least one generated record in every experiment; counts={counts}")
+        common_counts[key] = common_count
+
+        for experiment_index, experiment in enumerate(experiment_records):
+            records = list(grouped[experiment][key])
+            random.Random(seed + experiment_index * 100000 + sum(map(ord, key))).shuffle(records)
+            result[experiment]["train"].extend(records[:common_count])
+    return result, common_counts
+
+
+def split_real_records_by_task(records: list[dict], validation_ratio: float, seed: int):
+    train_records = []
+    validation_records = []
+    split_manifest = {}
+    grouped = defaultdict(list)
+    for record in records:
+        grouped[task_key(record)].append(record)
+
+    for key in sorted(grouped):
+        task_records = list(grouped[key])
+        if len(task_records) < 2:
+            raise ValueError(f"Real validation split for {key} needs at least two records.")
+        random.Random(seed + sum(map(ord, key))).shuffle(task_records)
+        validation_count = max(1, int(round(len(task_records) * validation_ratio)))
+        validation_count = min(validation_count, len(task_records) - 1)
+        validation = task_records[:validation_count]
+        train = task_records[validation_count:]
+        validation_records.extend(validation)
+        train_records.extend(train)
+        split_manifest[key] = {
+            "train": len(train),
+            "validation": len(validation),
+            "train_paths": [record["image_path"] for record in train],
+            "validation_paths": [record["image_path"] for record in validation],
+        }
+    return train_records, validation_records, split_manifest
+
+
 def train_epoch(model, loader, optimizer, scaler, device, ce_weight, dice_weight, use_amp, distributed_context):
     model.train()
     totals = np.zeros(4, dtype=np.float64)
@@ -396,6 +453,7 @@ def train_run(experiment, seed, splits, test_records, config, output_dir, distri
             "num_train": len(splits["train"]),
             "num_validation": len(splits["validation"]),
             "num_test": len(test_records),
+            "validation_source": "real_train_dir",
             "world_size": distributed_context.world_size,
             "per_gpu_batch_size": int(training["batch_size"]),
             "effective_batch_size": int(training["batch_size"]) * distributed_context.world_size,
@@ -518,11 +576,21 @@ def main():
         )
         for experiment in experiments
     }
-    splits, common_counts = build_balanced_splits(
+    splits, common_counts = build_balanced_train_records(
         experiment_records,
+        seed=int(config["training"]["seeds"][0]),
+    )
+    real_records = limit_records_per_task(
+        read_metadata(Path(config["paths"]["real_train_dir"]), generated=False),
+        args.max_samples_per_task,
+    )
+    _, validation_records, real_split_manifest = split_real_records_by_task(
+        real_records,
         validation_ratio=float(config["training"]["validation_ratio"]),
         seed=int(config["training"]["seeds"][0]),
     )
+    for split in splits.values():
+        split["validation"] = validation_records
     test_records = read_metadata(Path(config["paths"]["real_test_dir"]), generated=False)
     results = []
     try:
@@ -541,7 +609,12 @@ def main():
                     results.append(result)
         if distributed_context.is_main:
             summary = summarize(results, experiments)
-            write_summary(output_dir, summary, results, common_counts, config)
+            report_counts = {
+                "generated_train_common_counts": common_counts,
+                "real_validation_split": real_split_manifest,
+                "real_validation_total": len(validation_records),
+            }
+            write_summary(output_dir, summary, results, report_counts, config)
             print(json.dumps(to_jsonable(summary), indent=2, ensure_ascii=False))
     finally:
         distributed_context.close()
