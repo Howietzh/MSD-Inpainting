@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import models, transforms
 
 from utils.config_overrides import apply_config_overrides
-from utils.evaluation_regions import square_defect_roi_bounds
+from utils.evaluation_regions import partition_records_by_mask_validity, square_defect_roi_bounds
 
 
 def parse_args():
@@ -406,6 +406,19 @@ def evaluate_generation(config, device):
             skipped_tasks[task_key] = {"reason": "missing generated samples"}
             continue
 
+        real_local_records, real_empty_mask_records = partition_records_by_mask_validity(
+            real_dir, real_task_records
+        )
+        fake_local_records, fake_empty_mask_records = partition_records_by_mask_validity(
+            fake_dir, fake_task_records
+        )
+        if real_empty_mask_records or fake_empty_mask_records:
+            print(
+                f"Warning: {task_key} local metrics exclude empty masks "
+                f"(real={len(real_empty_mask_records)}, fake={len(fake_empty_mask_records)}). "
+                "Global metrics still include every image."
+            )
+
         real_global_loader = DataLoader(
             ImageOnlyDataset(real_dir, real_task_records, image_size, region="global"),
             batch_size=feature_batch_size,
@@ -422,7 +435,7 @@ def evaluate_generation(config, device):
         real_local_loader = DataLoader(
             ImageOnlyDataset(
                 real_dir,
-                real_task_records,
+                real_local_records,
                 local_image_size,
                 region="local",
                 local_padding_ratio=local_padding_ratio,
@@ -434,7 +447,7 @@ def evaluate_generation(config, device):
         fake_local_loader = DataLoader(
             ImageOnlyDataset(
                 fake_dir,
-                fake_task_records,
+                fake_local_records,
                 local_image_size,
                 region="local",
                 local_padding_ratio=local_padding_ratio,
@@ -471,7 +484,7 @@ def evaluate_generation(config, device):
             region="global",
         )
         local_ic_lpips = compute_ic_lpips(
-            fake_task_records,
+            fake_local_records,
             fake_dir,
             image_size=local_image_size,
             max_pairs=max_pairs,
@@ -496,6 +509,12 @@ def evaluate_generation(config, device):
             "ic_lpips": global_ic_lpips,
             "num_real": len(real_task_records),
             "num_fake": len(fake_task_records),
+            "num_real_local": len(real_local_records),
+            "num_fake_local": len(fake_local_records),
+            "num_real_empty_masks": len(real_empty_mask_records),
+            "num_fake_empty_masks": len(fake_empty_mask_records),
+            "real_mask_valid_rate": len(real_local_records) / len(real_task_records),
+            "fake_mask_valid_rate": len(fake_local_records) / len(fake_task_records),
         }
 
     summary = {
@@ -516,12 +535,38 @@ def evaluate_generation(config, device):
         "num_tasks_evaluated": len(task_results),
         "num_real_total": int(sum(result["num_real"] for result in task_results.values())),
         "num_fake_total": int(sum(result["num_fake"] for result in task_results.values())),
+        "num_real_local_total": int(
+            sum(result["num_real_local"] for result in task_results.values())
+        ),
+        "num_fake_local_total": int(
+            sum(result["num_fake_local"] for result in task_results.values())
+        ),
+        "num_real_empty_masks_total": int(
+            sum(result["num_real_empty_masks"] for result in task_results.values())
+        ),
+        "num_fake_empty_masks_total": int(
+            sum(result["num_fake_empty_masks"] for result in task_results.values())
+        ),
     }
+    summary["real_mask_valid_rate"] = (
+        summary["num_real_local_total"] / summary["num_real_total"]
+        if summary["num_real_total"]
+        else float("nan")
+    )
+    summary["fake_mask_valid_rate"] = (
+        summary["num_fake_local_total"] / summary["num_fake_total"]
+        if summary["num_fake_total"]
+        else float("nan")
+    )
 
     return {
         "metric_protocol": {
             "global": "full image resized to generation.image_size",
             "local": "square defect-mask bounding-box ROI with configurable context padding",
+            "empty_mask_policy": (
+                "included in global metrics; excluded from local metrics and reported via "
+                "mask-validity counts/rates"
+            ),
             "local_image_size": local_image_size,
             "local_padding_ratio": local_padding_ratio,
             "kid_scale": "polynomial MMD multiplied by 1000",

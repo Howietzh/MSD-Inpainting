@@ -1,4 +1,18 @@
 import numpy as np
+from PIL import Image
+
+
+def partition_records_by_mask_validity(data_dir, records: list[dict]):
+    valid_records = []
+    empty_records = []
+    for record in records:
+        mask_path = data_dir / record["defect_mask_path"]
+        mask = np.asarray(Image.open(mask_path).convert("L"))
+        if np.any(mask > 0):
+            valid_records.append(record)
+        else:
+            empty_records.append(record)
+    return valid_records, empty_records
 
 
 def square_defect_roi_bounds(

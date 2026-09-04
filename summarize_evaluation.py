@@ -50,6 +50,12 @@ def load_rows(report_path: Path):
                 **{field: task[field] for field in METRIC_FIELDS},
                 "num_real": task["num_real"],
                 "num_fake": task["num_fake"],
+                "num_real_local": task["num_real_local"],
+                "num_fake_local": task["num_fake_local"],
+                "num_real_empty_masks": task["num_real_empty_masks"],
+                "num_fake_empty_masks": task["num_fake_empty_masks"],
+                "real_mask_valid_rate": task["real_mask_valid_rate"],
+                "fake_mask_valid_rate": task["fake_mask_valid_rate"],
             }
         )
 
@@ -61,6 +67,12 @@ def load_rows(report_path: Path):
             **{field: summary[f"{field}_mean"] for field in METRIC_FIELDS},
             "num_real": summary["num_real_total"],
             "num_fake": summary["num_fake_total"],
+            "num_real_local": summary["num_real_local_total"],
+            "num_fake_local": summary["num_fake_local_total"],
+            "num_real_empty_masks": summary["num_real_empty_masks_total"],
+            "num_fake_empty_masks": summary["num_fake_empty_masks_total"],
+            "real_mask_valid_rate": summary["real_mask_valid_rate"],
+            "fake_mask_valid_rate": summary["fake_mask_valid_rate"],
         }
     )
     return rows
@@ -83,7 +95,19 @@ def main():
         rows.extend(load_rows(report_path))
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["experiment", "task", *METRIC_FIELDS, "num_real", "num_fake"]
+    fieldnames = [
+        "experiment",
+        "task",
+        *METRIC_FIELDS,
+        "num_real",
+        "num_fake",
+        "num_real_local",
+        "num_fake_local",
+        "num_real_empty_masks",
+        "num_fake_empty_masks",
+        "real_mask_valid_rate",
+        "fake_mask_valid_rate",
+    ]
     with open(args.output, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
