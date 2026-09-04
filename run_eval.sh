@@ -36,6 +36,7 @@ Options:
   --help                 Show this help message.
 
 Every run reports both full-image (global) and defect-ROI (local) KID/IC-LPIPS.
+For the repository's four existing method directories, run: bash run_global_local_eval.sh
 Additional arguments are passed through to evaluate.py. For example:
   bash run_eval.sh --exp-name exp_a \
     --set generation.feature_batch_size=8 \

@@ -12,11 +12,27 @@ METRIC_FIELDS = (
 )
 
 
+def display_experiment_name(name: str):
+    aliases = {
+        "defectfill_origin": "DefectFill",
+        "dfmgan_ccms": "DFMGAN",
+        "seas": "SeaS",
+    }
+    if name.startswith("increase_text_encoder_learning_r"):
+        return "MSD-Inpainting"
+    return aliases.get(name, name)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Collect global/local generation metrics from evaluation JSON reports."
     )
     parser.add_argument("--report-dir", type=Path, required=True)
+    parser.add_argument(
+        "--experiments",
+        nargs="+",
+        help="Only summarize these report stems, in the given order.",
+    )
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
@@ -29,7 +45,7 @@ def load_rows(report_path: Path):
     for task_key, task in sorted(generation["tasks"].items()):
         rows.append(
             {
-                "experiment": report_path.stem,
+                "experiment": display_experiment_name(report_path.stem),
                 "task": task_key,
                 **{field: task[field] for field in METRIC_FIELDS},
                 "num_real": task["num_real"],
@@ -40,7 +56,7 @@ def load_rows(report_path: Path):
     summary = generation["summary"]
     rows.append(
         {
-            "experiment": report_path.stem,
+            "experiment": display_experiment_name(report_path.stem),
             "task": "MEAN",
             **{field: summary[f"{field}_mean"] for field in METRIC_FIELDS},
             "num_real": summary["num_real_total"],
@@ -52,7 +68,13 @@ def load_rows(report_path: Path):
 
 def main():
     args = parse_args()
-    report_paths = sorted(args.report_dir.glob("*.json"))
+    if args.experiments:
+        report_paths = [args.report_dir / f"{name}.json" for name in args.experiments]
+        missing = [path for path in report_paths if not path.exists()]
+        if missing:
+            raise FileNotFoundError(f"Missing evaluation reports: {missing}")
+    else:
+        report_paths = sorted(args.report_dir.glob("*.json"))
     if not report_paths:
         raise FileNotFoundError(f"No evaluation JSON reports found under {args.report_dir}")
 
