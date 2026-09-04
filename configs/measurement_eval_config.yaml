@@ -1,0 +1,15 @@
+device: "cuda"
+segmentation_config: "configs/segmentation_ablation_config.yaml"
+
+paths:
+  output_dir: "/home/doctor/tzh/MSD-Inpainting/segmentation_results/mobilevit_unet_ablation/measurement_evaluation"
+
+evaluation:
+  batch_size: 8
+  num_workers: 4
+  mixed_precision: true
+  linear_minimum_area: 1
+  particle_minimum_area: 4
+  bootstrap_iterations: 2000
+  bootstrap_seed: 2026
+  epsilon: 1.0e-8
