@@ -169,12 +169,23 @@ def summarize_errors(
         bootstrap_mae[index] = per_image_error[sampled_images].mean()
     ci_low, ci_high = np.percentile(bootstrap_mae, [2.5, 97.5])
 
+    percentage_errors = 100.0 * absolute_errors / np.maximum(np.abs(ground_truth[None, :]), epsilon)
+    per_seed_max_percentage_error = percentage_errors.max(axis=1)
+
     return {
         "ground_truth_mean": float(ground_truth.mean()),
         "ground_truth_std": float(ground_truth.std(ddof=1)) if sample_count > 1 else 0.0,
         "mae": mae,
         "mae_ci_95": [float(ci_low), float(ci_high)],
         "nmae_percent": nmae,
+        "max_percentage_error_mean": float(per_seed_max_percentage_error.mean()),
+        "max_percentage_error_std": (
+            float(per_seed_max_percentage_error.std(ddof=1))
+            if per_seed_max_percentage_error.size > 1
+            else 0.0
+        ),
+        "max_percentage_error_per_seed": per_seed_max_percentage_error.tolist(),
+        "max_percentage_error_worst_seed": float(per_seed_max_percentage_error.max()),
         "num_images": int(sample_count),
         "num_seeds": int(predictions.shape[0]),
     }

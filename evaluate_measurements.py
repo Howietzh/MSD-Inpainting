@@ -195,6 +195,14 @@ def summarize_all(ground_truth, predictions, experiments, seeds, evaluation):
                         "mae_ci_95_low": summary["mae_ci_95"][0],
                         "mae_ci_95_high": summary["mae_ci_95"][1],
                         "nmae_percent": summary["nmae_percent"],
+                        "max_percentage_error_mean": summary["max_percentage_error_mean"],
+                        "max_percentage_error_std": summary["max_percentage_error_std"],
+                        "max_percentage_error_per_seed": json.dumps(
+                            summary["max_percentage_error_per_seed"]
+                        ),
+                        "max_percentage_error_worst_seed": summary[
+                            "max_percentage_error_worst_seed"
+                        ],
                         "num_images": summary["num_images"],
                         "num_seeds": summary["num_seeds"],
                     }
@@ -263,8 +271,8 @@ def write_outputs(
             for experiment in experiments:
                 row = lookup[(experiment, key, quantity)]
                 cells.append(
-                    f"{row['mae']:.3f} [{row['mae_ci_95_low']:.3f}, {row['mae_ci_95_high']:.3f}] / "
-                    f"{row['nmae_percent']:.2f}\\%"
+                    f"{row['max_percentage_error_mean']:.2f} $\\pm$ "
+                    f"{row['max_percentage_error_std']:.2f}\\%"
                 )
             task_cell = TASK_LABELS.get(key, key) if quantity_index == 0 else ""
             lines.append(
@@ -335,6 +343,10 @@ def main():
             "confidence_interval": "paired image bootstrap of seed-averaged absolute errors",
             "bootstrap_iterations": int(evaluation["bootstrap_iterations"]),
             "bootstrap_seed": int(evaluation["bootstrap_seed"]),
+            "primary_measurement_error": (
+                "For each seed, maximum absolute percentage error across test images; "
+                "reported as mean and sample standard deviation across seeds"
+            ),
         },
         "metrics": metrics,
     }

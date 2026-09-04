@@ -71,5 +71,9 @@ def test_summary_averages_errors_across_seeds_and_images():
     assert result["mae"] == 1.5
     assert math.isclose(result["nmae_percent"], 50.0)
     assert result["ground_truth_mean"] == 3.0
+    assert result["max_percentage_error_per_seed"] == [50.0, 75.0]
+    assert result["max_percentage_error_mean"] == 62.5
+    assert math.isclose(result["max_percentage_error_std"], 12.5 * math.sqrt(2.0))
+    assert result["max_percentage_error_worst_seed"] == 75.0
     assert result["num_images"] == 2
     assert result["num_seeds"] == 2
