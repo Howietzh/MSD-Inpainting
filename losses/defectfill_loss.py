@@ -11,6 +11,7 @@ class DefectFillLoss(nn.Module):
         lambda_attn_comp=0.05,
         defect_class_weights=None,
         dilation_kernel_size=5,
+        use_defect_sensitive_weighting=True,
     ):
         super().__init__()
         self.lambda_rec = float(lambda_rec)
@@ -18,6 +19,7 @@ class DefectFillLoss(nn.Module):
         self.lambda_attn_comp = float(lambda_attn_comp)
         self.defect_class_weights = defect_class_weights or {}
         self.dilation_kernel_size = int(dilation_kernel_size)
+        self.use_defect_sensitive_weighting = bool(use_defect_sensitive_weighting)
 
         if self.dilation_kernel_size <= 0 or self.dilation_kernel_size % 2 == 0:
             raise ValueError("dilation_kernel_size must be a positive odd integer.")
@@ -82,8 +84,13 @@ class DefectFillLoss(nn.Module):
         latent_dilated_mask = self._dilate_mask(latent_defect_mask) * latent_component_mask
         latent_dilated_mask = (latent_dilated_mask > 0.5).float()
 
-        defect_weights = self._resolve_defect_weights(defect_tokens, model_pred.device, model_pred.dtype)
-        reconstruction_weight_map = 1.0 + defect_weights * latent_dilated_mask
+        defect_weights = self._resolve_defect_weights(
+            defect_tokens, model_pred.device, model_pred.dtype
+        )
+        if self.use_defect_sensitive_weighting:
+            reconstruction_weight_map = 1.0 + defect_weights * latent_dilated_mask
+        else:
+            reconstruction_weight_map = torch.ones_like(latent_defect_mask)
 
         loss_rec = self._weighted_mse(model_pred, target_noise, reconstruction_weight_map)
 

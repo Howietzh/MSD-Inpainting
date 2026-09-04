@@ -11,6 +11,7 @@ from peft import PeftModel
 
 from dataset.normal_dataset import NormalComponentDataset
 from utils.mask_ops import DefectMaskEngine
+from utils.ablation import build_conditioning_prompt
 
 
 def tokenize_prompts(tokenizer, prompts):
@@ -164,7 +165,9 @@ def run_periodic_inference_validation(
 
     try:
         for sample in validation_suite:
-            prompt = f"a photo of {sample['object_token']} with {sample['defect_token']}"
+            prompt = build_conditioning_prompt(
+                config, sample["object_token"], sample["defect_token"]
+            )
             prompt_ids = tokenize_prompts(pipeline.tokenizer, [prompt]).to(accelerator.device)
             defect_token_index = _find_first_matching_token_index(prompt_ids, defect_token_ids)
             component_token_index = _find_first_matching_token_index(prompt_ids, component_token_ids)

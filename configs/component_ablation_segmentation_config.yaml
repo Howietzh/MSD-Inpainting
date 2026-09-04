@@ -1,0 +1,38 @@
+device: "cuda"
+pretrained_model_name: "/home/doctor/tzh/MSD-Inpainting/pretrained/mobilevit-x-small"
+local_files_only: true
+
+paths:
+  generated_root: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/generated_defect_dataset"
+  real_train_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/defect_train_concept"
+  real_test_dir: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/defect_test_holdout"
+  output_dir: "/home/doctor/tzh/MSD-Inpainting/segmentation_results/component_ablation"
+
+experiments:
+  - "component_ablation_full"
+  - "component_ablation_no_dsl"
+  - "component_ablation_no_dmaa"
+  - "component_ablation_no_cdme"
+  - "component_ablation_no_ti"
+
+training:
+  seeds: [42, 43, 44]
+  image_size: 512
+  epochs: 1000
+  batch_size: 8
+  num_workers: 4
+  validation_ratio: 0.2
+  validation_every: 10
+  encoder_learning_rate: 1.0e-4
+  decoder_learning_rate: 3.0e-4
+  weight_decay: 1.0e-4
+  ce_weight: 1.0
+  dice_weight: 1.0
+  mixed_precision: true
+
+augmentation:
+  resize_min: 0.75
+  resize_max: 1.25
+  clahe_probability: 0.5
+  clahe_clip_limit: 2.0
+  clahe_grid_size: 8

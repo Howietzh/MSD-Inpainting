@@ -17,6 +17,7 @@ from torch.utils.data import RandomSampler, DataLoader
 
 from utils.runtime import resolve_model_source, resolve_weight_dtype
 from utils.mask_ops import DefectMaskEngine
+from utils.ablation import build_conditioning_prompt
 from dataset.normal_dataset import NormalComponentDataset
 
 class DefectFillPipeline:
@@ -52,6 +53,7 @@ class DefectFillPipeline:
     def _build_models(self, config_path, lora_dir):
         with open(config_path, "r", encoding="utf-8") as f:
             train_config = yaml.safe_load(f)
+        self.train_config = train_config
             
         if self.distributed_state.is_main_process:
             print("🚀 初始化 Stable Diffusion 与 LoRA 权重...")
@@ -183,6 +185,12 @@ class DefectFillPipeline:
         guidance_scale = self.infer_config.get("guidance_scale", 7.5)
         negative_prompt = self.infer_config.get("negative_prompt", "blurry, smooth, unrealistic, artifacts")
         base_seed = self.infer_config.get("base_seed", 42)
+        mask_strategy = str(self.infer_config.get("mask_strategy", "cdme")).lower()
+        if mask_strategy not in {"cdme", "reference_elastic"}:
+            raise ValueError(
+                f"Unsupported inference.mask_strategy={mask_strategy!r}; "
+                "expected 'cdme' or 'reference_elastic'."
+            )
         
         for task_idx, task in enumerate(tasks):
             defect_token, comp_token, target_count = task["defect"], task["comp"], task["count"]
@@ -244,10 +252,28 @@ class DefectFillPipeline:
                     # 2. 为当前 Batch 生成动态缺陷掩码
                     for b in range(current_b_size):
                         valid_found = False
-                        while not valid_found:
-                            defect_mask_np = self.mask_engine.generate_dynamic_mask(comp_masks_np[b], defect_token)
+                        attempts = 0
+                        while not valid_found and attempts < 20:
+                            if mask_strategy == "reference_elastic":
+                                defect_mask_np = self.mask_engine.generate_reference_elastic_mask(
+                                    comp_masks_np[b],
+                                    defect_token,
+                                    comp_token,
+                                    alpha=float(self.infer_config.get("reference_elastic_alpha", 10.0)),
+                                    sigma=float(self.infer_config.get("reference_elastic_sigma", 4.0)),
+                                )
+                            else:
+                                defect_mask_np = self.mask_engine.generate_dynamic_mask(
+                                    comp_masks_np[b], defect_token
+                                )
                             if defect_mask_np is not None and cv2.countNonZero(defect_mask_np) > 0:
                                 valid_found = True
+                            attempts += 1
+                        if not valid_found:
+                            raise RuntimeError(
+                                f"Failed to generate a valid {mask_strategy} mask for "
+                                f"{defect_token} on {comp_token} after {attempts} attempts."
+                            )
                         
                         defect_masks_np.append(defect_mask_np)
                         # 将 OpenCV 生成的掩码转为 Pipeline 需要的 [0, 1] Tensor
@@ -257,7 +283,10 @@ class DefectFillPipeline:
                     # 合并成掩码批次: [B, 1, 512, 512]
                     mask_images_tensor = torch.stack(defect_masks_tensor_list).to(self.device, dtype=self.weight_dtype)
                     
-                    prompts = [f"a photo of {comp_token} with {defect_token}"] * current_b_size
+                    prompt = build_conditioning_prompt(
+                        self.train_config, comp_token, defect_token
+                    )
+                    prompts = [prompt] * current_b_size
                     neg_prompts = [negative_prompt] * current_b_size
                     best_scores = [-1.0] * current_b_size
                     best_images = [None] * current_b_size
@@ -327,7 +356,8 @@ class DefectFillPipeline:
                             "visualization_path": f"visualizations/{vis_save_path.name}",
                             "prompt": prompts[b],
                             "object_token": comp_token,
-                            "defect_token": defect_token
+                            "defect_token": defect_token,
+                            "mask_strategy": mask_strategy,
                         }
                         with open(self.metadata_path, "a", encoding="utf-8") as mf:
                             mf.write(json.dumps(record) + "\n")

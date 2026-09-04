@@ -19,6 +19,11 @@ from utils.runtime import resolve_model_source, resolve_pretrained_variant, reso
 from utils.class_weighting import resolve_defect_class_weights
 from utils.monitoring import TokenDriftMonitor, TensorBoardVisualizer
 from utils.validation_runner import build_validation_suite, run_periodic_inference_validation, tokenize_prompts
+from utils.ablation import (
+    use_defect_sensitive_loss,
+    use_dual_mask_attention,
+    use_textual_inversion,
+)
 
 
 def parse_args():
@@ -64,6 +69,11 @@ def main():
         accelerator.init_trackers("defectfill_training")
         if applied_overrides:
             print(f"🛠️ 已应用配置覆盖: {applied_overrides}")
+        resolved_config_path = Path(config["paths"]["output_dir"]) / "resolved_train_config.yaml"
+        resolved_config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(resolved_config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
+        print(f"🧾 已保存解析后的训练配置: {resolved_config_path}")
 
     # 加载预训练模型
     model_source = resolve_model_source(config["paths"])
@@ -101,7 +111,9 @@ def main():
 
     # 挂载 Attention Hook
     attn_store = AttentionStore()
-    attn_store.register_to_unet(unet.base_model.model)
+    dual_mask_attention_enabled = use_dual_mask_attention(config)
+    if dual_mask_attention_enabled:
+        attn_store.register_to_unet(unet.base_model.model)
 
     # 实例化 Loss
     lw = config["loss_weights"]
@@ -111,12 +123,17 @@ def main():
         lambda_attn_def=lw["lambda_attn_def"],
         lambda_attn_comp=lw["lambda_attn_comp"],
         defect_class_weights=defect_class_weights,
+        use_defect_sensitive_weighting=use_defect_sensitive_loss(config),
     )
     if accelerator.is_main_process:
         print(f"🎯 已加载缺陷类别权重: {defect_class_weights}")
 
     validation_suite = build_validation_suite(config)
-    token_monitor = TokenDriftMonitor(text_encoder, tokenizer, defect_tokens, component_tokens)
+    monitored_defect_tokens = defect_tokens if use_textual_inversion(config) else []
+    monitored_component_tokens = component_tokens if use_textual_inversion(config) else []
+    token_monitor = TokenDriftMonitor(
+        text_encoder, tokenizer, monitored_defect_tokens, monitored_component_tokens
+    )
 
     # 配置优化器
     opt_cfg = config["optimizer"]
@@ -139,7 +156,9 @@ def main():
     ], weight_decay=float(opt_cfg["weight_decay"]))
 
     # 准备数据与加速器
-    dataset = DefectFillDataset(data_dir=config["paths"]["data_dir"], tokenizer=tokenizer)
+    dataset = DefectFillDataset(
+        data_dir=config["paths"]["data_dir"], tokenizer=tokenizer, config=config
+    )
     dataloader = DataLoader(
         dataset,
         batch_size=config["training"]["train_batch_size"],
@@ -204,13 +223,17 @@ def main():
                     named_token_indices["defect"] = defect_token_indices
                 if all(token_index >= 0 for token_index in component_token_indices):
                     named_token_indices["component"] = component_token_indices
-                if named_token_indices:
+                if dual_mask_attention_enabled and named_token_indices:
                     attn_store.set_named_target_token_indices(named_token_indices)
 
                 object_hidden_states = text_encoder(object_prompt_ids)[0]
                 model_pred = unet(model_input, timesteps, object_hidden_states).sample
 
-                attention_maps = attn_store.get_aggregated_attentions(target_size=latents.shape[-1])
+                attention_maps = (
+                    attn_store.get_aggregated_attentions(target_size=latents.shape[-1])
+                    if dual_mask_attention_enabled
+                    else {}
+                )
                 loss, loss_dict = criterion(
                     model_pred,
                     noise,
@@ -248,7 +271,7 @@ def main():
         if accelerator.is_main_process:
             unwrapped_text_encoder = accelerator.unwrap_model(text_encoder)
             token_monitor.log_token_drift(unwrapped_text_encoder, visualizer, epoch)
-            all_custom_tokens = defect_tokens + component_tokens
+            all_custom_tokens = monitored_defect_tokens + monitored_component_tokens
             visualizer.log_token_confusion_matrix(
                 unwrapped_text_encoder,
                 tokenizer,

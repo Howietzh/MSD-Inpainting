@@ -47,11 +47,14 @@ def setup_lora_and_tokens(
     unet: UNet2DConditionModel,
     config: dict,
 ):
+    use_textual_inversion = bool(
+        (config.get("ablation", {}) or {}).get("use_textual_inversion", True)
+    )
     # 1. 扩充词表：合并缺陷和组件 tokens
     defect_tokens = config.get("defect_tokens", [])
     component_tokens = config.get("component_tokens", [])
     token_init_phrases = config.get("token_init_phrases", {})
-    all_new_tokens = defect_tokens + component_tokens
+    all_new_tokens = defect_tokens + component_tokens if use_textual_inversion else []
     base_vocab_size = len(tokenizer)
 
     num_added = tokenizer.add_tokens(all_new_tokens)
@@ -74,12 +77,21 @@ def setup_lora_and_tokens(
     )
 
     # 提取 ID 以供后续定位使用
-    defect_token_ids = [tokenizer.convert_tokens_to_ids(tok) for tok in defect_tokens]
-    component_token_ids = [tokenizer.convert_tokens_to_ids(tok) for tok in component_tokens]
+    defect_token_ids = (
+        [tokenizer.convert_tokens_to_ids(tok) for tok in defect_tokens]
+        if use_textual_inversion
+        else []
+    )
+    component_token_ids = (
+        [tokenizer.convert_tokens_to_ids(tok) for tok in component_tokens]
+        if use_textual_inversion
+        else []
+    )
 
     print(
         f"✅ 成功向词表添加了 {num_added} 个新概念 Token "
-        f"(缺陷: {len(defect_tokens)} 个, 组件: {len(component_tokens)} 个)。"
+        f"(缺陷: {len(defect_token_ids)} 个, 组件: {len(component_token_ids)} 个, "
+        f"textual inversion: {use_textual_inversion})。"
     )
 
     # 2. 注入 Text Encoder LoRA，并只训练新增 token 对应的 embedding 行

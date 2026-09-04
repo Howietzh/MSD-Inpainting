@@ -35,6 +35,11 @@ loss_weights:
   lambda_attn_comp: 0.05
   defect_class_weights: {}          # 留空时按训练集 defect mask 像素统计自动生成固定类别权重
 
+ablation:
+  use_defect_sensitive_loss: true
+  use_dual_mask_attention: true
+  use_textual_inversion: true
+
 validation_inference:
   enabled: true
   num_inference_steps: 30

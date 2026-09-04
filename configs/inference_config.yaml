@@ -11,6 +11,11 @@ paths:
   stats_cache: "/home/doctor/tzh/MSD-Inpainting/data/CCM-Defect/defect_stats_cache.json"
 
 inference:
+  # cdme: proposed topology-aware mask engine;
+  # reference_elastic: real training masks with elastic deformation (w/o CDME).
+  mask_strategy: "cdme"
+  reference_elastic_alpha: 10.0
+  reference_elastic_sigma: 4.0
   batch_size: 8                    # 【新增】每次从 DataLoader 抽取几张不同的正常图
   num_lfs_samples: 8               # 针对每张图，生成 8 个样本做 LFS (低保真度) 优选
   num_inference_steps: 30          

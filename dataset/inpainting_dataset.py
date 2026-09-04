@@ -6,11 +6,14 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 from transformers import CLIPTokenizer
 
+from utils.ablation import build_conditioning_prompt
+
 class DefectFillDataset(Dataset):
-    def __init__(self, data_dir: str, tokenizer: CLIPTokenizer, size: int = 512):
+    def __init__(self, data_dir: str, tokenizer: CLIPTokenizer, size: int = 512, config=None):
         self.data_dir = Path(data_dir)
         self.tokenizer = tokenizer
         self.size = size
+        self.config = config or {}
         
         self.metadata = []
         metadata_path = self.data_dir / "metadata.jsonl"
@@ -76,5 +79,7 @@ class DefectFillDataset(Dataset):
             "object_token": object_token,
             "defect_token": defect_token,
             "defect_prompt": f"a photo of {defect_token}",
-            "object_prompt": f"a photo of {object_token} with {defect_token}",
+            "object_prompt": build_conditioning_prompt(
+                self.config, object_token, defect_token
+            ),
         }

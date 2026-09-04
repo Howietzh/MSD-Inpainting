@@ -29,6 +29,88 @@ class DefectMaskEngine:
         self.train_dir = train_dir
         self.cache_file = cache_file
         self.stats_cache = {}
+        self._reference_masks = None
+
+    def _load_reference_masks(self):
+        if self._reference_masks is not None:
+            return
+
+        self._reference_masks = {}
+        metadata_path = self.train_dir / "metadata.jsonl"
+        if not metadata_path.exists():
+            raise FileNotFoundError(
+                f"Reference-mask ablation requires training metadata: {metadata_path}"
+            )
+
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            for line in f:
+                item = json.loads(line.strip())
+                defect_token = item.get("defect_token")
+                component_token = item.get("object_token")
+                relative_path = item.get("defect_mask_path")
+                if not defect_token or not component_token or not relative_path:
+                    continue
+                mask_path = self.train_dir / relative_path
+                if mask_path.exists():
+                    self._reference_masks.setdefault(
+                        (defect_token, component_token), []
+                    ).append(mask_path)
+
+    def generate_reference_elastic_mask(
+        self,
+        comp_mask_np,
+        defect_token,
+        component_token,
+        alpha: float = 10.0,
+        sigma: float = 4.0,
+    ):
+        """Warp a real training mask for the w/o-CDME inference ablation."""
+        if alpha < 0 or sigma <= 0:
+            raise ValueError("Elastic deformation requires alpha >= 0 and sigma > 0.")
+
+        self._load_reference_masks()
+        candidates = self._reference_masks.get((defect_token, component_token), [])
+        if not candidates:
+            raise KeyError(
+                f"No reference masks for {defect_token} on {component_token}."
+            )
+
+        mask_path = random.choice(candidates)
+        reference = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        if reference is None:
+            raise ValueError(f"Cannot read reference defect mask: {mask_path}")
+        reference = cv2.resize(
+            reference,
+            (self.shape[1], self.shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        reference = (reference > 0).astype(np.uint8) * 255
+
+        height, width = reference.shape
+        dx = cv2.GaussianBlur(
+            np.random.uniform(-1.0, 1.0, (height, width)).astype(np.float32),
+            (0, 0),
+            sigmaX=sigma,
+        ) * alpha
+        dy = cv2.GaussianBlur(
+            np.random.uniform(-1.0, 1.0, (height, width)).astype(np.float32),
+            (0, 0),
+            sigmaX=sigma,
+        ) * alpha
+        grid_x, grid_y = np.meshgrid(
+            np.arange(width, dtype=np.float32),
+            np.arange(height, dtype=np.float32),
+        )
+        warped = cv2.remap(
+            reference,
+            grid_x + dx,
+            grid_y + dy,
+            interpolation=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        component_binary = (comp_mask_np > 0).astype(np.uint8) * 255
+        return cv2.bitwise_and(warped, component_binary)
 
     def _build_default_stats(self, defect_token):
         if "particle" in defect_token:

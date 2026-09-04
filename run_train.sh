@@ -111,6 +111,10 @@ CUDA_VISIBLE_DEVICES="0,1" accelerate launch \
     "${TRAIN_EXTRA_ARGS[@]}"
 
 if [[ "$RUN_INFERENCE" -eq 1 ]]; then
+    RESOLVED_TRAIN_CONFIG="$TRAIN_OUTPUT_DIR/resolved_train_config.yaml"
+    if [[ ! -f "$RESOLVED_TRAIN_CONFIG" ]]; then
+        RESOLVED_TRAIN_CONFIG="$TRAIN_CONFIG"
+    fi
     CUDA_VISIBLE_DEVICES="0,1" accelerate launch \
         --multi_gpu \
         --num_processes=2 \
@@ -121,5 +125,5 @@ if [[ "$RUN_INFERENCE" -eq 1 ]]; then
         --config "$INFER_CONFIG" \
         --lora_weights "$TRAIN_OUTPUT_DIR" \
         --output_dir "$INFER_OUTPUT_DIR" \
-        --set "paths.model_config=${TRAIN_CONFIG}"
+        --set "paths.model_config=${RESOLVED_TRAIN_CONFIG}"
 fi
