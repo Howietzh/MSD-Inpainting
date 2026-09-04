@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import models, transforms
 
 from utils.config_overrides import apply_config_overrides
+from utils.evaluation_regions import square_defect_roi_bounds
 
 
 def parse_args():
@@ -117,6 +118,34 @@ def read_rgb_image(path: Path, size: int):
     return image.resize((size, size), resample=Image.BILINEAR)
 
 
+def read_local_rgb_image(
+    image_path: Path,
+    mask_path: Path,
+    size: int,
+    padding_ratio: float,
+):
+    """Crop a square defect ROI around a non-empty mask and resize it."""
+    image = Image.open(image_path).convert("RGB")
+    mask = Image.open(mask_path).convert("L")
+    if image.size != mask.size:
+        raise ValueError(
+            f"Image and defect mask dimensions differ: image={image_path} {image.size}, "
+            f"mask={mask_path} {mask.size}"
+        )
+
+    try:
+        bounds = square_defect_roi_bounds(
+            np.asarray(mask),
+            image_width=image.width,
+            image_height=image.height,
+            padding_ratio=padding_ratio,
+        )
+    except ValueError as exc:
+        raise ValueError(f"Cannot compute local metrics for {mask_path}: {exc}") from exc
+    roi = image.crop(bounds)
+    return roi.resize((size, size), resample=Image.BILINEAR)
+
+
 def image_to_tensor(image: Image.Image):
     return transforms.ToTensor()(image)
 
@@ -128,24 +157,55 @@ def imagenet_normalize(tensor: torch.Tensor):
 
 
 class ImageOnlyDataset(Dataset):
-    def __init__(self, data_dir: Path, records: list[dict], image_size: int):
+    def __init__(
+        self,
+        data_dir: Path,
+        records: list[dict],
+        image_size: int,
+        region: str = "global",
+        local_padding_ratio: float = 0.25,
+    ):
         self.data_dir = data_dir
         self.records = records
         self.image_size = image_size
+        self.region = region
+        self.local_padding_ratio = local_padding_ratio
+        if region not in {"global", "local"}:
+            raise ValueError(f"Unsupported evaluation region: {region}")
 
     def __len__(self):
         return len(self.records)
 
     def __getitem__(self, index):
         record = self.records[index]
-        image = read_rgb_image(self.data_dir / record["image_path"], self.image_size)
+        if self.region == "local":
+            image = read_local_rgb_image(
+                self.data_dir / record["image_path"],
+                self.data_dir / record["defect_mask_path"],
+                self.image_size,
+                self.local_padding_ratio,
+            )
+        else:
+            image = read_rgb_image(self.data_dir / record["image_path"], self.image_size)
         return image_to_tensor(image)
 
 
 class LPIPSPairDataset(Dataset):
-    def __init__(self, data_dir: Path, pairs: list[tuple[dict, dict]], image_size: int):
+    def __init__(
+        self,
+        data_dir: Path,
+        pairs: list[tuple[dict, dict]],
+        image_size: int,
+        region: str = "global",
+        local_padding_ratio: float = 0.25,
+    ):
         self.data_dir = data_dir
         self.pairs = pairs
+        self.image_size = image_size
+        self.region = region
+        self.local_padding_ratio = local_padding_ratio
+        if region not in {"global", "local"}:
+            raise ValueError(f"Unsupported evaluation region: {region}")
         self.transform = transforms.Compose([
             transforms.Resize((image_size, image_size), interpolation=transforms.InterpolationMode.BILINEAR),
             transforms.ToTensor(),
@@ -157,8 +217,22 @@ class LPIPSPairDataset(Dataset):
 
     def __getitem__(self, index):
         rec_a, rec_b = self.pairs[index]
-        img_a = Image.open(self.data_dir / rec_a["image_path"]).convert("RGB")
-        img_b = Image.open(self.data_dir / rec_b["image_path"]).convert("RGB")
+        if self.region == "local":
+            img_a = read_local_rgb_image(
+                self.data_dir / rec_a["image_path"],
+                self.data_dir / rec_a["defect_mask_path"],
+                self.image_size,
+                self.local_padding_ratio,
+            )
+            img_b = read_local_rgb_image(
+                self.data_dir / rec_b["image_path"],
+                self.data_dir / rec_b["defect_mask_path"],
+                self.image_size,
+                self.local_padding_ratio,
+            )
+        else:
+            img_a = Image.open(self.data_dir / rec_a["image_path"]).convert("RGB")
+            img_b = Image.open(self.data_dir / rec_b["image_path"]).convert("RGB")
         return self.transform(img_a), self.transform(img_b)
 
 
@@ -246,17 +320,29 @@ def build_pairs(records: list[dict], max_pairs: int):
 
 
 @torch.no_grad()
-def compute_ic_lpips(records, data_dir: Path, image_size: int, max_pairs: int, batch_size: int, backbone: str, device):
-    import lpips
-
+def compute_ic_lpips(
+    records,
+    data_dir: Path,
+    image_size: int,
+    max_pairs: int,
+    batch_size: int,
+    metric,
+    device,
+    region: str = "global",
+    local_padding_ratio: float = 0.25,
+):
     pairs = build_pairs(records, max_pairs)
     if not pairs:
         return float("nan")
 
-    metric = lpips.LPIPS(net=backbone).to(device)
-    metric.eval()
     loader = DataLoader(
-        LPIPSPairDataset(data_dir, pairs, image_size),
+        LPIPSPairDataset(
+            data_dir,
+            pairs,
+            image_size,
+            region=region,
+            local_padding_ratio=local_padding_ratio,
+        ),
         batch_size=batch_size,
         shuffle=False,
         num_workers=0,
@@ -287,6 +373,12 @@ def evaluate_generation(config, device):
     max_pairs = int(config["generation"]["ic_lpips_max_pairs_per_category"])
     lpips_backbone = str(config["generation"].get("ic_lpips_backbone", "alex"))
     lpips_batch_size = int(config["generation"].get("lpips_batch_size", 32))
+    local_image_size = int(config["generation"].get("local_image_size", image_size))
+    local_padding_ratio = float(config["generation"].get("local_padding_ratio", 0.25))
+    if local_image_size <= 0:
+        raise ValueError("generation.local_image_size must be positive")
+    if not np.isfinite(local_padding_ratio) or local_padding_ratio < 0:
+        raise ValueError("generation.local_padding_ratio must be finite and non-negative")
 
     real_records = load_real_metadata(real_dir)
     fake_records = load_generated_metadata(fake_dir)
@@ -296,6 +388,10 @@ def evaluate_generation(config, device):
 
     all_task_keys = sorted(set(real_grouped) | set(fake_grouped))
     inception = build_inception(device)
+    import lpips
+
+    lpips_metric = lpips.LPIPS(net=lpips_backbone).to(device)
+    lpips_metric.eval()
     task_results = {}
     skipped_tasks = {}
 
@@ -310,30 +406,80 @@ def evaluate_generation(config, device):
             skipped_tasks[task_key] = {"reason": "missing generated samples"}
             continue
 
-        real_loader = DataLoader(
-            ImageOnlyDataset(real_dir, real_task_records, image_size),
+        real_global_loader = DataLoader(
+            ImageOnlyDataset(real_dir, real_task_records, image_size, region="global"),
             batch_size=feature_batch_size,
             shuffle=False,
             num_workers=0,
         )
-        fake_loader = DataLoader(
-            ImageOnlyDataset(fake_dir, fake_task_records, image_size),
+        fake_global_loader = DataLoader(
+            ImageOnlyDataset(fake_dir, fake_task_records, image_size, region="global"),
             batch_size=feature_batch_size,
             shuffle=False,
             num_workers=0,
         )
 
-        real_features = extract_inception_features(inception, real_loader, device)
-        fake_features = extract_inception_features(inception, fake_loader, device)
-        kid = compute_kid(real_features, fake_features, subset_size=subset_size, num_subsets=num_subsets)
-        ic_lpips = compute_ic_lpips(
+        real_local_loader = DataLoader(
+            ImageOnlyDataset(
+                real_dir,
+                real_task_records,
+                local_image_size,
+                region="local",
+                local_padding_ratio=local_padding_ratio,
+            ),
+            batch_size=feature_batch_size,
+            shuffle=False,
+            num_workers=0,
+        )
+        fake_local_loader = DataLoader(
+            ImageOnlyDataset(
+                fake_dir,
+                fake_task_records,
+                local_image_size,
+                region="local",
+                local_padding_ratio=local_padding_ratio,
+            ),
+            batch_size=feature_batch_size,
+            shuffle=False,
+            num_workers=0,
+        )
+
+        real_global_features = extract_inception_features(inception, real_global_loader, device)
+        fake_global_features = extract_inception_features(inception, fake_global_loader, device)
+        real_local_features = extract_inception_features(inception, real_local_loader, device)
+        fake_local_features = extract_inception_features(inception, fake_local_loader, device)
+        global_kid = compute_kid(
+            real_global_features,
+            fake_global_features,
+            subset_size=subset_size,
+            num_subsets=num_subsets,
+        )
+        local_kid = compute_kid(
+            real_local_features,
+            fake_local_features,
+            subset_size=subset_size,
+            num_subsets=num_subsets,
+        )
+        global_ic_lpips = compute_ic_lpips(
             fake_task_records,
             fake_dir,
             image_size=image_size,
             max_pairs=max_pairs,
             batch_size=lpips_batch_size,
-            backbone=lpips_backbone,
+            metric=lpips_metric,
             device=device,
+            region="global",
+        )
+        local_ic_lpips = compute_ic_lpips(
+            fake_task_records,
+            fake_dir,
+            image_size=local_image_size,
+            max_pairs=max_pairs,
+            batch_size=lpips_batch_size,
+            metric=lpips_metric,
+            device=device,
+            region="local",
+            local_padding_ratio=local_padding_ratio,
         )
 
         object_token = fake_task_records[0]["object_token"]
@@ -341,15 +487,31 @@ def evaluate_generation(config, device):
         task_results[task_key] = {
             "object_token": object_token,
             "defect_token": defect_token,
-            "kid": kid,
-            "ic_lpips": ic_lpips,
+            "global_kid": global_kid,
+            "local_kid": local_kid,
+            "global_ic_lpips": global_ic_lpips,
+            "local_ic_lpips": local_ic_lpips,
+            # Backward-compatible aliases. These retain the historical full-image semantics.
+            "kid": global_kid,
+            "ic_lpips": global_ic_lpips,
             "num_real": len(real_task_records),
             "num_fake": len(fake_task_records),
         }
 
     summary = {
-        "kid_mean": nanmean([result["kid"] for result in task_results.values()]),
-        "ic_lpips_mean": nanmean([result["ic_lpips"] for result in task_results.values()]),
+        "global_kid_mean": nanmean([result["global_kid"] for result in task_results.values()]),
+        "local_kid_mean": nanmean([result["local_kid"] for result in task_results.values()]),
+        "global_ic_lpips_mean": nanmean(
+            [result["global_ic_lpips"] for result in task_results.values()]
+        ),
+        "local_ic_lpips_mean": nanmean(
+            [result["local_ic_lpips"] for result in task_results.values()]
+        ),
+        # Backward-compatible aliases. These retain the historical full-image semantics.
+        "kid_mean": nanmean([result["global_kid"] for result in task_results.values()]),
+        "ic_lpips_mean": nanmean(
+            [result["global_ic_lpips"] for result in task_results.values()]
+        ),
         "num_tasks_total": len(all_task_keys),
         "num_tasks_evaluated": len(task_results),
         "num_real_total": int(sum(result["num_real"] for result in task_results.values())),
@@ -357,6 +519,13 @@ def evaluate_generation(config, device):
     }
 
     return {
+        "metric_protocol": {
+            "global": "full image resized to generation.image_size",
+            "local": "square defect-mask bounding-box ROI with configurable context padding",
+            "local_image_size": local_image_size,
+            "local_padding_ratio": local_padding_ratio,
+            "kid_scale": "polynomial MMD multiplied by 1000",
+        },
         "summary": summary,
         "tasks": task_results,
         "skipped_tasks": skipped_tasks,

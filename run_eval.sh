@@ -35,10 +35,12 @@ Options:
   --report-root PATH     Override the base directory for evaluation reports.
   --help                 Show this help message.
 
+Every run reports both full-image (global) and defect-ROI (local) KID/IC-LPIPS.
 Additional arguments are passed through to evaluate.py. For example:
   bash run_eval.sh --exp-name exp_a \
     --set generation.feature_batch_size=8 \
-    --set generation.lpips_batch_size=16
+    --set generation.lpips_batch_size=16 \
+    --set generation.local_padding_ratio=0.25
 EOF
 }
 

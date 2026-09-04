@@ -13,3 +13,6 @@ generation:
   ic_lpips_max_pairs_per_category: 200
   ic_lpips_backbone: "alex"
   lpips_batch_size: 32
+  # Local metrics use a square ROI centered on each real/generated defect mask.
+  local_image_size: 224
+  local_padding_ratio: 0.25
