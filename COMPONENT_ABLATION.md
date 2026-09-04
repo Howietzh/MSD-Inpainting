@@ -32,6 +32,12 @@ FULL_WEIGHTS_NAME=increase_text_encoder_learning_rates \
   bash run_component_ablation_infer.sh
 ```
 
+Legacy Full-model directories may not contain `resolved_train_config.yaml`. The
+inference script automatically falls back to `configs/train_config.yaml` for
+Full, w/o DSL, w/o DMAA, and w/o CDME because they retain textual-inversion
+prompts. The w/o-TI variant cannot use this fallback and must be trained by the
+new ablation training script.
+
 The five output directories are created under `data/CCM-Defect/generated_defect_dataset`.
 
 ## 3. Evaluate global and local synthesis quality

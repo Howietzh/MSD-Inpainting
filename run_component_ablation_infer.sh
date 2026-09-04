@@ -33,13 +33,19 @@ infer_variant() {
     local output_name="$1"
     local weights_name="$2"
     local mask_strategy="$3"
+    local require_resolved_config="${4:-0}"
     local weights_dir="${WEIGHTS_ROOT%/}/${weights_name}"
     local output_dir="${GENERATED_ROOT%/}/${output_name}"
     local resolved_config="${weights_dir%/}/resolved_train_config.yaml"
 
     if [[ ! -f "$resolved_config" ]]; then
-        echo "Missing resolved training config: $resolved_config" >&2
-        exit 2
+        if [[ "$require_resolved_config" -eq 1 ]]; then
+            echo "Missing resolved training config required by $output_name: $resolved_config" >&2
+            echo "Retrain this variant with run_component_ablation_train.sh." >&2
+            exit 2
+        fi
+        resolved_config="$TRAIN_CONFIG"
+        echo "Warning: legacy weights have no resolved_train_config.yaml; using $TRAIN_CONFIG"
     fi
 
     echo "=========================================================="
@@ -63,8 +69,8 @@ infer_variant() {
         --set "inference.mask_strategy=${mask_strategy}"
 }
 
-infer_variant component_ablation_full "$FULL_WEIGHTS_NAME" cdme
-infer_variant component_ablation_no_dsl component_ablation_no_dsl cdme
-infer_variant component_ablation_no_dmaa component_ablation_no_dmaa cdme
-infer_variant component_ablation_no_cdme "$FULL_WEIGHTS_NAME" reference_elastic
-infer_variant component_ablation_no_ti component_ablation_no_ti cdme
+infer_variant component_ablation_full "$FULL_WEIGHTS_NAME" cdme 0
+infer_variant component_ablation_no_dsl component_ablation_no_dsl cdme 0
+infer_variant component_ablation_no_dmaa component_ablation_no_dmaa cdme 0
+infer_variant component_ablation_no_cdme "$FULL_WEIGHTS_NAME" reference_elastic 0
+infer_variant component_ablation_no_ti component_ablation_no_ti cdme 1
